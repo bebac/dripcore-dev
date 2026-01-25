@@ -56,13 +56,18 @@ namespace dripcore
   public:
     void register_event(int fd, short events, std::coroutine_handle<> h);
     void ready_task(std::coroutine_handle<> h);
-    void process_ready_tasks();
+    bool process_ready_tasks();
     void run();
   private:
-    void process_events();
+    void process_events(bool use_zero_timeout = false);
     void resume_ptr(void* ptr);
+    void setup_wake_notification();
+    void trigger_wake_notification();
   private:
     platform_fd_type scheduler_fd_ = -1;
+#if defined(__linux__)
+    platform_fd_type wake_event_fd_ = -1;  // eventfd for wake notifications
+#endif
     std::list<task_handle> tasks_;
     std::vector<std::coroutine_handle<>> ready_queue_;
   };
