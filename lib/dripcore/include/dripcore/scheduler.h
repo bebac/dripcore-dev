@@ -1,0 +1,71 @@
+#ifndef DRIPCORE_SCHEDULER_H
+#define DRIPCORE_SCHEDULER_H
+
+#include <dripcore/task.h>
+//#include <dripcore/event.h>
+#include <vector>
+#include <list>
+#include <atomic>
+#include <functional>
+#include <queue>
+#include <chrono>
+#include <optional>
+#include <iostream>
+
+#if defined(__linux__)
+#include <sys/epoll.h>
+#elif defined(__APPLE__)
+#include <sys/event.h>
+#endif
+#include <unistd.h>
+
+namespace dripcore
+{
+  class scheduler
+  {
+  public:
+    scheduler();
+    ~scheduler();
+  public:
+    template <typename T, typename... Args>
+    void spawn(Args&&... args) {
+      // 1. Create the task object (e.g., greeter)
+      // We use a shared_ptr to keep the task object alive as long
+      // as the coroutine (task_handle) is alive.
+      auto obj = std::make_shared<T>(std::forward<Args>(args)...);
+
+      // 2. Store the scheduler in the task object as this is needed when
+      // awaiters call yield, readable, writable etc.
+      obj->scheduler_ptr_ = this;
+
+      // 3. Start the coroutine.
+      // We assume the convention that T has a method 'execute()'
+      // which returns a dripcore::task.
+      auto t = obj->execute();
+
+      // 4. Register the task
+      //t.set_scheduler(this);
+      t.set_holder(obj);
+
+      // 5. Keep the task in the execution list and add it to the
+      // ready list.
+      auto& r = tasks_.emplace_back(std::move(t));
+
+      ready_task(r.handle_);
+    }
+  public:
+    void register_event(int fd, short events, std::coroutine_handle<> h);
+    void ready_task(std::coroutine_handle<> h);
+    void process_ready_tasks();
+    void run();
+  private:
+    void process_events();
+    void resume_ptr(void* ptr);
+  private:
+    platform_fd_type scheduler_fd_ = -1;
+    std::list<task_handle> tasks_;
+    std::vector<std::coroutine_handle<>> ready_queue_;
+  };
+}
+
+#endif // DRIPCORE_SCHEDULER_H
