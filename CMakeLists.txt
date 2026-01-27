@@ -19,10 +19,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # -----------------------------------------------
 
 add_library(core STATIC
-    lib/dripcore/source/task.cpp
+    lib/dripcore/source/task_handle.cpp
     lib/dripcore/source/scheduler.cpp
     lib/dripcore/source/yield_awaiter.cpp
     lib/dripcore/source/io_awaiter.cpp
+    lib/dripcore/source/socket.cpp
 )
 
 target_compile_features(core PRIVATE cxx_std_20)

@@ -1,7 +1,7 @@
 #ifndef DRIPCORE_SCHEDULER_H
 #define DRIPCORE_SCHEDULER_H
 
-#include <dripcore/task.h>
+#include <dripcore/task_handle.h>
 //#include <dripcore/event.h>
 #include <vector>
 #include <list>

@@ -89,6 +89,7 @@ int main(int argc, char* argv[])
 
 #include "dripcore/task.h"
 #include "dripcore/scheduler.h"
+#include "dripcore/socket.h"
 
 #include <coroutine>
 #include <iostream>
@@ -113,11 +114,68 @@ private:
   std::string name_;
 };
 
+class echo_connection : public dripcore::task {
+public:
+  echo_connection(dripcore::socket socket) : socket_(std::move(socket)) {}
+
+  dripcore::task_handle execute() {
+    char buf[4096];
+
+    while (true) {
+      co_await readable(socket_.native_handle());
+
+      ssize_t n = read(socket_.native_handle(), buf, sizeof(buf));
+      if (n <= 0) break;  // EOF or error
+
+      // Echo back
+      co_await writable(socket_.native_handle());
+      write(socket_.native_handle(), buf, n);
+    }
+
+    // Socket closes automatically
+  }
+
+private:
+  dripcore::socket socket_;
+};
+
+class echo_server : public dripcore::task {
+public:
+  echo_server(int port) : port_(port) {}
+
+  dripcore::task_handle execute() {
+    dripcore::socket server = dripcore::ipv4::tcp::socket();
+    dripcore::socket_address addr("127.0.0.1", 4321);
+    server.bind(addr);
+    server.listen(5);
+    server.nonblocking(true);
+
+    while (true) {
+      co_await readable(server.native_handle());
+
+      dripcore::socket_address client_address;
+
+      auto address_len = socklen_t{client_address.len()};
+      auto client = server.accept(client_address.ptr(), &address_len);
+
+      client.nonblocking(true);
+
+      // Spawn connection handler using task::spawn()
+      spawn<echo_connection>(std::move(client));
+
+      std::cout << "client connected " << client_address << std::endl;
+    }
+  }
+private:
+  int port_;
+};
+
 int main(int argc, char* argv[])
 {
   dripcore::scheduler scheduler;
 
-  scheduler.spawn<greeter>("Alice");
+  //scheduler.spawn<greeter>("Alice");
+  scheduler.spawn<echo_server>(4321);
   scheduler.run();
 
   return 0;
