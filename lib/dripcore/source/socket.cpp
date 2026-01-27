@@ -110,7 +110,7 @@ namespace dripcore
       }
     }
   public:
-    int native_handle() const
+    int platform_handle() const
     {
       return fd_;
     }
@@ -140,12 +140,12 @@ namespace dripcore
 
   socket::~socket()
   {
-    //std::cout << "destruct socket fd_=" << native_handle() << std::endl;
+    //std::cout << "destruct socket fd_=" << platform_handle() << std::endl;
   }
 
   socket& socket::operator= (const socket& rhs)
   {
-    pimpl_ = std::make_unique<implementation>(dup(rhs.native_handle()));
+    pimpl_ = std::make_unique<implementation>(dup(rhs.platform_handle()));
     return *this;
   }
 
@@ -216,7 +216,7 @@ namespace dripcore
     auto client = pimpl_->accept(addr.ptr(), &len);
     // if ( client )
     // {
-    //   auto fd = client.native_handle();
+    //   auto fd = client.platform_handle();
     //   int flags = fcntl(fd, F_GETFL, 0);
     //   fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     // }
@@ -260,9 +260,9 @@ namespace dripcore
     pimpl_->keepalive(value);
   }
 
-  int socket::native_handle() const
+  int socket::platform_handle() const
   {
     assert(pimpl_);
-    return pimpl_->native_handle();
+    return pimpl_->platform_handle();
   }
 }

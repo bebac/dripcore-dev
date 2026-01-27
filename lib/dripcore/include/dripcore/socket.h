@@ -51,7 +51,7 @@ namespace dripcore
     void reuseaddr(bool value = true);
     void keepalive(bool value = true);
   public:
-    int native_handle() const;
+    int platform_handle() const;
   private:
     class implementation;
     std::unique_ptr<implementation> pimpl_;

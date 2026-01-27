@@ -122,14 +122,14 @@ public:
     char buf[4096];
 
     while (true) {
-      co_await readable(socket_.native_handle());
+      co_await readable(socket_);
 
-      ssize_t n = read(socket_.native_handle(), buf, sizeof(buf));
+      ssize_t n = socket_.recv(buf, sizeof(buf));
       if (n <= 0) break;  // EOF or error
 
       // Echo back
-      co_await writable(socket_.native_handle());
-      write(socket_.native_handle(), buf, n);
+      co_await writable(socket_);
+      write(socket_.platform_handle(), buf, n);
     }
 
     // Socket closes automatically
@@ -145,13 +145,13 @@ public:
 
   dripcore::task_handle execute() {
     dripcore::socket server = dripcore::ipv4::tcp::socket();
-    dripcore::socket_address addr("127.0.0.1", 4321);
+    dripcore::socket_address addr("0.0.0.0", 4321);
     server.bind(addr);
     server.listen(5);
     server.nonblocking(true);
 
     while (true) {
-      co_await readable(server.native_handle());
+      co_await readable(server);
 
       dripcore::socket_address client_address;
 
