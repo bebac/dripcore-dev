@@ -71,7 +71,7 @@ namespace dripcore
   {
     bool was_empty = ready_queue_.empty();
     ready_queue_.push_back(h);
-    
+
     // Wake up the event loop if it was waiting
     if (was_empty) {
       trigger_wake_notification();
@@ -91,7 +91,7 @@ namespace dripcore
         h.resume();
       }
     }
-    
+
     return !to_run.empty();
   }
 
@@ -100,14 +100,14 @@ namespace dripcore
     while (!tasks_.empty())
     {
       bool had_ready_tasks = process_ready_tasks();
-      
+
       // Use zero timeout if we had ready tasks or more were added during processing.
       // This ensures we don't block when there's CPU work to do, while still
       // checking for I/O events to prevent starvation.
       bool use_zero_timeout = had_ready_tasks || !ready_queue_.empty();
       process_events(use_zero_timeout);
 
-      tasks_.remove_if([](const auto &t) { return t.is_done(); });
+      tasks_.remove_if([](const auto &t) { return t.done(); });
     }
   }
 
@@ -133,7 +133,7 @@ namespace dripcore
     struct kevent evs[32];
     // Use zero timeout for non-blocking poll (when we have CPU work),
     // otherwise use 1 second timeout (wake notification will interrupt)
-    struct timespec ts = use_zero_timeout ? 
+    struct timespec ts = use_zero_timeout ?
       (struct timespec){0, 0} :      // zero (non-blocking)
       (struct timespec){1, 0};       // 1 second
     int n = kevent(scheduler_fd_, nullptr, 0, evs, 32, &ts);

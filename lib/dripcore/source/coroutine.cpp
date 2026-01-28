@@ -27,7 +27,7 @@ namespace dripcore
     other.handle_ = nullptr;
   }
 
-  bool coroutine::is_done() const
+  bool coroutine::done() const
   {
     return handle_.done();
   }

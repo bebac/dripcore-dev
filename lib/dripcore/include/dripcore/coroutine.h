@@ -47,7 +47,7 @@ namespace dripcore
     coroutine &operator=(const coroutine &) = delete;
     coroutine(coroutine &&other) noexcept;
   public:
-    bool is_done() const;
+    bool done() const;
   private:
     void set_holder(std::shared_ptr<void> ptr);
   private:
