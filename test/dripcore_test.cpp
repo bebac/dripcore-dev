@@ -1,5 +1,5 @@
 #include "doctest/doctest.h"
-#include "dripcore/executor.h"
+#include "dripcore/scheduler.h"
 #include "dripcore/task.h"
 
 #include <iostream>
@@ -33,7 +33,7 @@ private:
 
 TEST_CASE("dripcore scheduler basic test")
 {
-  dripcore::executor executor;
+  dripcore::scheduler executor;
 
   std::atomic<bool> task_ran{false};
 
@@ -135,7 +135,7 @@ TEST_CASE("dripcore scheduler many timers test")
 
 TEST_CASE("dripcore scheduler pipe communication test")
 {
-  dripcore::executor executor;
+  dripcore::scheduler executor;
 
   // Create a pipe
   int pipefd[2];
@@ -229,7 +229,7 @@ TEST_CASE("benchmark: executor timeout flaw - yield-only tasks")
   simple_bench bench("spawn_and_yield_tasks");
 
   bench.run(1, []() {
-    dripcore::executor executor;
+    dripcore::scheduler executor;
 
     int completed_count = 0;
     const int num_tasks = 100;
@@ -294,7 +294,7 @@ TEST_CASE("benchmark: single task spawn latency")
   std::printf("Actual with 10ms poll timeout:\n\n");
 
   for (int run = 0; run < 5; ++run) {
-    dripcore::executor executor;
+    dripcore::scheduler executor;
     bool task_done = false;
 
     class simple_task : public dripcore::task
@@ -334,7 +334,7 @@ TEST_CASE("I/O tasks are not starved by CPU-bound tasks")
   // This test ensures that I/O tasks get a chance to run even when
   // CPU-bound tasks keep yielding
 
-  dripcore::executor executor;
+  dripcore::scheduler executor;
 
   int pipefd[2];
   REQUIRE(pipe(pipefd) == 0);

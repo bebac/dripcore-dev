@@ -88,7 +88,7 @@ int main(int argc, char* argv[])
 #endif
 
 #include "dripcore/task.h"
-#include "dripcore/executor.h"
+#include "dripcore/scheduler.h"
 #include "dripcore/socket.h"
 
 #include <coroutine>
@@ -172,11 +172,11 @@ private:
 
 int main(int argc, char* argv[])
 {
-  dripcore::executor executor;
+  dripcore::scheduler scheduler;
 
-  //executor.spawn<greeter>("Alice");
-  executor.spawn<echo_server>(4321);
-  executor.run();
+  //scheduler.spawn<greeter>("Alice");
+  scheduler.spawn<echo_server>(4321);
+  scheduler.run();
 
   return 0;
 }
