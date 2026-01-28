@@ -18,12 +18,22 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Core library
 # -----------------------------------------------
 
+# Detect platform and select appropriate event loop implementation
+if(APPLE)
+    set(EVENT_LOOP_SOURCE lib/dripcore/source/event_loop_kqueue.cpp)
+elseif(UNIX)
+    set(EVENT_LOOP_SOURCE lib/dripcore/source/event_loop_epoll.cpp)
+else()
+    message(FATAL_ERROR "Unsupported platform")
+endif()
+
 add_library(core STATIC
     lib/dripcore/source/coroutine.cpp
     lib/dripcore/source/executor.cpp
     lib/dripcore/source/yield_awaiter.cpp
     lib/dripcore/source/io_awaiter.cpp
     lib/dripcore/source/socket.cpp
+    ${EVENT_LOOP_SOURCE}
 )
 
 target_compile_features(core PRIVATE cxx_std_20)

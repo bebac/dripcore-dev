@@ -2,6 +2,7 @@
 #define DRIPCORE_EXECUTOR_H
 
 #include <dripcore/coroutine.h>
+#include <dripcore/event_loop.h>
 //#include <dripcore/event.h>
 #include <vector>
 #include <list>
@@ -11,13 +12,7 @@
 #include <chrono>
 #include <optional>
 #include <iostream>
-
-#if defined(__linux__)
-#include <sys/epoll.h>
-#elif defined(__APPLE__)
-#include <sys/event.h>
-#endif
-#include <unistd.h>
+#include <memory>
 
 namespace dripcore
 {
@@ -62,13 +57,8 @@ namespace dripcore
   private:
     void process_events(bool use_zero_timeout = false);
     void resume_ptr(void* ptr);
-    void setup_wake_notification();
-    void trigger_wake_notification();
   private:
-    platform_fd_type scheduler_fd_ = -1;
-#if defined(__linux__)
-    platform_fd_type wake_event_fd_ = -1;  // eventfd for wake notifications
-#endif
+    std::unique_ptr<event_loop> event_loop_;
     std::list<coroutine> tasks_;
     std::vector<std::coroutine_handle<>> ready_queue_;
   };
