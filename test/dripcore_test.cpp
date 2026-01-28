@@ -42,7 +42,7 @@ TEST_CASE("dripcore scheduler basic test")
   public:
     test_task(std::atomic<bool>& task_ran) : task_ran_(task_ran) {}
   public:
-    dripcore::task_handle execute() {
+    dripcore::coroutine execute() {
       task_ran_ = true;
       co_await yield();
       //co_return;
@@ -155,7 +155,7 @@ TEST_CASE("dripcore scheduler pipe communication test")
   public:
     writer_task(int fd, bool& done) : write_fd_(fd), done_(done) {}
 
-    dripcore::task_handle execute() {
+    dripcore::coroutine execute() {
       const char* msg = "Hello from writer!";
 
       // Wait until pipe is writable
@@ -181,7 +181,7 @@ TEST_CASE("dripcore scheduler pipe communication test")
     reader_task(int fd, std::string& result, bool& done)
       : read_fd_(fd), result_(result), done_(done) {}
 
-    dripcore::task_handle execute() {
+    dripcore::coroutine execute() {
       char buffer[256];
 
       // Wait until pipe is readable
@@ -239,7 +239,7 @@ TEST_CASE("benchmark: executor timeout flaw - yield-only tasks")
     public:
       yield_task(int& counter) : counter_(counter) {}
 
-      dripcore::task_handle execute() {
+      dripcore::coroutine execute() {
         // Just yield a few times and finish
         co_await yield();
         co_await yield();
@@ -302,7 +302,7 @@ TEST_CASE("benchmark: single task spawn latency")
     public:
       simple_task(bool& done) : done_(done) {}
 
-      dripcore::task_handle execute() {
+      dripcore::coroutine execute() {
         co_await yield();
         done_ = true;
         co_return;
@@ -351,7 +351,7 @@ TEST_CASE("I/O tasks are not starved by CPU-bound tasks")
   public:
     cpu_task(int& counter, int max) : counter_(counter), max_(max) {}
 
-    dripcore::task_handle execute() {
+    dripcore::coroutine execute() {
       while (counter_ < max_) {
         counter_++;
         co_await yield();
@@ -371,7 +371,7 @@ TEST_CASE("I/O tasks are not starved by CPU-bound tasks")
     io_task(int read_fd, int write_fd, bool& done)
       : read_fd_(read_fd), write_fd_(write_fd), done_(done) {}
 
-    dripcore::task_handle execute() {
+    dripcore::coroutine execute() {
       // First write to the pipe so there's data to read
       const char* msg = "test";
       write(write_fd_, msg, strlen(msg));

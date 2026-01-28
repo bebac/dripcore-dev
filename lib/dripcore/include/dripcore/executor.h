@@ -1,7 +1,7 @@
 #ifndef DRIPCORE_EXECUTOR_H
 #define DRIPCORE_EXECUTOR_H
 
-#include <dripcore/task_handle.h>
+#include <dripcore/coroutine.h>
 //#include <dripcore/event.h>
 #include <vector>
 #include <list>
@@ -41,7 +41,7 @@ namespace dripcore
 
       // 3. Start the coroutine.
       // We assume the convention that T has a method 'execute()'
-      // which returns a dripcore::task.
+      // which returns a dripcore::coroutine.
       auto t = obj->execute();
 
       // 4. Register the task
@@ -69,7 +69,7 @@ namespace dripcore
 #if defined(__linux__)
     platform_fd_type wake_event_fd_ = -1;  // eventfd for wake notifications
 #endif
-    std::list<task_handle> tasks_;
+    std::list<coroutine> tasks_;
     std::vector<std::coroutine_handle<>> ready_queue_;
   };
 }

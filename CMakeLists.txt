@@ -19,7 +19,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # -----------------------------------------------
 
 add_library(core STATIC
-    lib/dripcore/source/task_handle.cpp
+    lib/dripcore/source/coroutine.cpp
     lib/dripcore/source/executor.cpp
     lib/dripcore/source/yield_awaiter.cpp
     lib/dripcore/source/io_awaiter.cpp
