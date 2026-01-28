@@ -24,7 +24,7 @@ public:
     auto total = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
 
     std::printf("[BENCHMARK] %s: %lld ns per op (%.3f ms total)\n",
-                name_, total / iterations, total / 1000000.0);
+                name_, (long long)(total / iterations), total / 1000000.0);
   }
 
 private:
@@ -263,7 +263,7 @@ TEST_CASE("benchmark: executor timeout flaw - yield-only tasks")
 
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
-    std::printf("  Completed %d tasks in %lld ms\n", completed_count, elapsed_ms);
+    std::printf("  Completed %d tasks in %lld ms\n", completed_count, (long long)elapsed_ms);
     std::printf("  Average: %.2f ms per task\n", (double)elapsed_ms / num_tasks);
 
     // Verify all tasks completed
@@ -277,7 +277,7 @@ TEST_CASE("benchmark: executor timeout flaw - yield-only tasks")
     // Current: Likely 30-100ms+ due to polling timeouts
 
     if (elapsed_ms > 50) {
-      std::printf("  WARNING: Executor took %lld ms - demonstrating timeout flaw!\n", elapsed_ms);
+      std::printf("  WARNING: Executor took %lld ms - demonstrating timeout flaw!\n", (long long)elapsed_ms);
       std::printf("  The executor waits for poll timeout even when no I/O is pending.\n");
     }
   });
@@ -319,7 +319,7 @@ TEST_CASE("benchmark: single task spawn latency")
 
     auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
 
-    std::printf("  Run %d: %lld μs (%.3f ms)\n", run + 1, elapsed_us, elapsed_us / 1000.0);
+    std::printf("  Run %d: %lld μs (%.3f ms)\n", run + 1, (long long)elapsed_us, elapsed_us / 1000.0);
     CHECK(task_done == true);
   }
 
