@@ -1,5 +1,5 @@
-#ifndef DRIPCORE_SCHEDULER_H
-#define DRIPCORE_SCHEDULER_H
+#ifndef DRIPCORE_EXECUTOR_H
+#define DRIPCORE_EXECUTOR_H
 
 #include <dripcore/task_handle.h>
 //#include <dripcore/event.h>
@@ -21,11 +21,14 @@
 
 namespace dripcore
 {
-  class scheduler
+  class executor
   {
   public:
-    scheduler();
-    ~scheduler();
+    executor();
+    ~executor();
+    
+    // Get the current thread's executor (thread-local)
+    static executor* current();
   public:
     template <typename T, typename... Args>
     void spawn(Args&&... args) {
@@ -34,9 +37,7 @@ namespace dripcore
       // as the coroutine (task_handle) is alive.
       auto obj = std::make_shared<T>(std::forward<Args>(args)...);
 
-      // 2. Store the scheduler in the task object as this is needed when
-      // awaiters call yield, readable, writable etc.
-      obj->scheduler_ptr_ = this;
+      // 2. (REMOVED) No longer needed - tasks use executor::current() instead
 
       // 3. Start the coroutine.
       // We assume the convention that T has a method 'execute()'
@@ -73,4 +74,4 @@ namespace dripcore
   };
 }
 
-#endif // DRIPCORE_SCHEDULER_H
+#endif // DRIPCORE_EXECUTOR_H

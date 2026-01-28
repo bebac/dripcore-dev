@@ -12,7 +12,7 @@
 
 namespace dripcore
 {
-  class scheduler;
+  class executor;
 
 #if defined(__linux__)
   using platform_fd_type = int;
@@ -22,7 +22,7 @@ namespace dripcore
 
   class task_handle
   {
-    friend class scheduler;
+    friend class executor;
   public:
     struct promise_type
     {

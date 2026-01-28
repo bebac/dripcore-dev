@@ -5,11 +5,11 @@
 
 namespace dripcore
 {
-  class scheduler;
+  class executor;
 
   struct yield_awaiter
   {
-    scheduler* scheduler_ptr;
+    executor* exec_ptr;
     bool await_ready() { return false; }
     void await_suspend(std::coroutine_handle<> h);
     void await_resume() {}

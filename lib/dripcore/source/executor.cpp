@@ -1,4 +1,4 @@
-#include <dripcore/scheduler.h>
+#include <dripcore/executor.h>
 #include <system_error>
 #include <algorithm>
 #include <unistd.h>
@@ -12,8 +12,12 @@
 
 namespace dripcore
 {
-  scheduler::scheduler()
+  // Thread-local storage for current executor
+  thread_local executor* current_executor = nullptr;
+
+  executor::executor()
   {
+    current_executor = this;
 #ifdef __APPLE__
     scheduler_fd_ = kqueue();
 #else
@@ -27,7 +31,7 @@ namespace dripcore
     setup_wake_notification();
   }
 
-  scheduler::~scheduler()
+  executor::~executor()
   {
 #if defined(__linux__)
     if (wake_event_fd_ >= 0) {
@@ -39,7 +43,12 @@ namespace dripcore
     }
   }
 
-  void scheduler::register_event(int fd, short events, std::coroutine_handle<> h)
+  executor* executor::current()
+  {
+    return current_executor;
+  }
+
+  void executor::register_event(int fd, short events, std::coroutine_handle<> h)
   {
 #if defined(__linux__)
     struct epoll_event ev;
@@ -58,7 +67,7 @@ namespace dripcore
 #endif
   }
 
-  void scheduler::ready_task(std::coroutine_handle<> h)
+  void executor::ready_task(std::coroutine_handle<> h)
   {
     bool was_empty = ready_queue_.empty();
     ready_queue_.push_back(h);
@@ -69,7 +78,7 @@ namespace dripcore
     }
   }
 
-  bool scheduler::process_ready_tasks()
+  bool executor::process_ready_tasks()
   {
     // Use a local swap to avoid infinite loops if tasks yield back immediately
     std::vector<std::coroutine_handle<>> to_run;
@@ -86,7 +95,7 @@ namespace dripcore
     return !to_run.empty();
   }
 
-  void scheduler::run()
+  void executor::run()
   {
     while (!tasks_.empty())
     {
@@ -102,7 +111,7 @@ namespace dripcore
     }
   }
 
-  void scheduler::process_events(bool use_zero_timeout)
+  void executor::process_events(bool use_zero_timeout)
   {
 #if defined(__linux__)
     struct epoll_event evs[32];
@@ -138,14 +147,14 @@ namespace dripcore
 #endif
   }
 
-  void scheduler::resume_ptr(void *ptr)
+  void executor::resume_ptr(void *ptr)
   {
     if (ptr) {
       std::coroutine_handle<>::from_address(ptr).resume();
     }
   }
 
-  void scheduler::setup_wake_notification()
+  void executor::setup_wake_notification()
   {
 #if defined(__linux__)
     // Create an eventfd for wake notifications
@@ -172,7 +181,7 @@ namespace dripcore
 #endif
   }
 
-  void scheduler::trigger_wake_notification()
+  void executor::trigger_wake_notification()
   {
 #if defined(__linux__)
     // Write to eventfd to wake up epoll_wait

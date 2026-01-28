@@ -1,5 +1,5 @@
 #include "doctest/doctest.h"
-#include "dripcore/scheduler.h"
+#include "dripcore/executor.h"
 #include "dripcore/task.h"
 
 #include <iostream>
@@ -33,7 +33,7 @@ private:
 
 TEST_CASE("dripcore scheduler basic test")
 {
-  dripcore::scheduler scheduler;
+  dripcore::executor executor;
 
   std::atomic<bool> task_ran{false};
 
@@ -51,8 +51,8 @@ TEST_CASE("dripcore scheduler basic test")
     std::atomic<bool>& task_ran_;
   };
 
-  scheduler.spawn<test_task>(task_ran);
-  scheduler.run();
+  executor.spawn<test_task>(task_ran);
+  executor.run();
 
   CHECK(task_ran == true);
 }
@@ -135,7 +135,7 @@ TEST_CASE("dripcore scheduler many timers test")
 
 TEST_CASE("dripcore scheduler pipe communication test")
 {
-  dripcore::scheduler scheduler;
+  dripcore::executor executor;
 
   // Create a pipe
   int pipefd[2];
@@ -205,11 +205,11 @@ TEST_CASE("dripcore scheduler pipe communication test")
   };
 
   // Spawn both tasks
-  scheduler.spawn<writer_task>(pipefd[1], writer_done);
-  scheduler.spawn<reader_task>(pipefd[0], received_message, reader_done);
+  executor.spawn<writer_task>(pipefd[1], writer_done);
+  executor.spawn<reader_task>(pipefd[0], received_message, reader_done);
 
-  // Run the scheduler
-  scheduler.run();
+  // Run the executor
+  executor.run();
 
   // Verify both tasks completed
   CHECK(writer_done == true);
@@ -217,19 +217,19 @@ TEST_CASE("dripcore scheduler pipe communication test")
   CHECK(received_message == "Hello from writer!");
 }
 
-TEST_CASE("benchmark: scheduler timeout flaw - yield-only tasks")
+TEST_CASE("benchmark: executor timeout flaw - yield-only tasks")
 {
-  // This benchmark demonstrates the flaw in the current scheduler:
-  // The scheduler always waits for the poll timeout (10ms) even when
+  // This benchmark demonstrates the flaw in the current executor:
+  // The executor always waits for the poll timeout (10ms) even when
   // there are no I/O events to wait for, only ready tasks.
   //
   // Expected behavior: Tasks that only yield should complete quickly
-  // Actual behavior: Each scheduler loop iteration incurs ~10ms overhead
+  // Actual behavior: Each executor loop iteration incurs ~10ms overhead
 
   simple_bench bench("spawn_and_yield_tasks");
 
   bench.run(1, []() {
-    dripcore::scheduler scheduler;
+    dripcore::executor executor;
 
     int completed_count = 0;
     const int num_tasks = 100;
@@ -254,11 +254,11 @@ TEST_CASE("benchmark: scheduler timeout flaw - yield-only tasks")
 
     // Spawn many tasks that only yield (no I/O)
     for (int i = 0; i < num_tasks; ++i) {
-      scheduler.spawn<yield_task>(completed_count);
+      executor.spawn<yield_task>(completed_count);
     }
 
     auto start = std::chrono::high_resolution_clock::now();
-    scheduler.run();
+    executor.run();
     auto end = std::chrono::high_resolution_clock::now();
 
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -269,7 +269,7 @@ TEST_CASE("benchmark: scheduler timeout flaw - yield-only tasks")
     // Verify all tasks completed
     CHECK(completed_count == num_tasks);
 
-    // The flaw: With 100 tasks yielding 3 times each, we have ~300 scheduler
+    // The flaw: With 100 tasks yielding 3 times each, we have ~300 executor
     // iterations. Each iteration waits up to 10ms in poll, even though there
     // are ready tasks to run. This can add hundreds of milliseconds of overhead.
     //
@@ -277,8 +277,8 @@ TEST_CASE("benchmark: scheduler timeout flaw - yield-only tasks")
     // Current: Likely 30-100ms+ due to polling timeouts
 
     if (elapsed_ms > 50) {
-      std::printf("  WARNING: Scheduler took %lld ms - demonstrating timeout flaw!\n", elapsed_ms);
-      std::printf("  The scheduler waits for poll timeout even when no I/O is pending.\n");
+      std::printf("  WARNING: Executor took %lld ms - demonstrating timeout flaw!\n", elapsed_ms);
+      std::printf("  The executor waits for poll timeout even when no I/O is pending.\n");
     }
   });
 }
@@ -294,7 +294,7 @@ TEST_CASE("benchmark: single task spawn latency")
   std::printf("Actual with 10ms poll timeout:\n\n");
 
   for (int run = 0; run < 5; ++run) {
-    dripcore::scheduler scheduler;
+    dripcore::executor executor;
     bool task_done = false;
 
     class simple_task : public dripcore::task
@@ -313,8 +313,8 @@ TEST_CASE("benchmark: single task spawn latency")
     };
 
     auto start = std::chrono::high_resolution_clock::now();
-    scheduler.spawn<simple_task>(task_done);
-    scheduler.run();
+    executor.spawn<simple_task>(task_done);
+    executor.run();
     auto end = std::chrono::high_resolution_clock::now();
 
     auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
@@ -324,7 +324,7 @@ TEST_CASE("benchmark: single task spawn latency")
   }
 
   std::printf("\nFLAW EXPLANATION:\n");
-  std::printf("The scheduler.run() loop calls process_events() which waits\n");
+  std::printf("The executor.run() loop calls process_events() which waits\n");
   std::printf("for the poll timeout (10ms) even when there are no I/O events\n");
   std::printf("registered. This adds unnecessary latency to pure CPU-bound tasks.\n");
 }
@@ -334,7 +334,7 @@ TEST_CASE("I/O tasks are not starved by CPU-bound tasks")
   // This test ensures that I/O tasks get a chance to run even when
   // CPU-bound tasks keep yielding
 
-  dripcore::scheduler scheduler;
+  dripcore::executor executor;
 
   int pipefd[2];
   REQUIRE(pipe(pipefd) == 0);
@@ -395,10 +395,10 @@ TEST_CASE("I/O tasks are not starved by CPU-bound tasks")
   };
 
   // Spawn both tasks - CPU task first, then I/O task
-  scheduler.spawn<cpu_task>(cpu_task_yields, max_yields);
-  scheduler.spawn<io_task>(pipefd[0], pipefd[1], io_task_completed);
+  executor.spawn<cpu_task>(cpu_task_yields, max_yields);
+  executor.spawn<io_task>(pipefd[0], pipefd[1], io_task_completed);
 
-  scheduler.run();
+  executor.run();
 
   // Both tasks should complete
   CHECK(cpu_task_yields == max_yields);

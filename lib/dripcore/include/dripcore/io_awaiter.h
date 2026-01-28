@@ -5,13 +5,13 @@
 
 namespace dripcore
 {
-  class scheduler;
+  class executor;
 
   struct io_awaiter
   {
     int fd_;
     short events_;         // POLLIN | POLLOUT
-    scheduler* scheduler_ptr_;
+    executor* exec_ptr_;
 
     // Return false to indicate we want to suspend
     bool await_ready() const noexcept { return false; }

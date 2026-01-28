@@ -1,7 +1,7 @@
 #ifndef DRIPCORE_TASK_H
 #define DRIPCORE_TASK_H
 
-#include <dripcore/scheduler.h>
+#include <dripcore/executor.h>
 #include <concepts>
 
 namespace dripcore
@@ -18,38 +18,35 @@ namespace dripcore
     template <typename T, typename... Args>
     void spawn(Args &&...args)
     {
-      scheduler_ptr_->spawn<T>(std::forward<Args>(args)...);
+      executor::current()->spawn<T>(std::forward<Args>(args)...);
     }
   protected:
     auto yield()
     {
-      return yield_awaiter{scheduler_ptr_};
+      return yield_awaiter{executor::current()};
     }
     
     // Raw file descriptor overload
     auto readable(int fd)
     {
-      return io_awaiter{fd, POLLIN, scheduler_ptr_};
+      return io_awaiter{fd, POLLIN, executor::current()};
     }
     auto writable(int fd)
     {
-      return io_awaiter{fd, POLLOUT, scheduler_ptr_};
+      return io_awaiter{fd, POLLOUT, executor::current()};
     }
     
     // Generic overload for any type with platform_handle()
     template<HasPlatformHandle T>
     auto readable(const T& obj)
     {
-      return io_awaiter{obj.platform_handle(), POLLIN, scheduler_ptr_};
+      return io_awaiter{obj.platform_handle(), POLLIN, executor::current()};
     }
     template<HasPlatformHandle T>
     auto writable(const T& obj)
     {
-      return io_awaiter{obj.platform_handle(), POLLOUT, scheduler_ptr_};
+      return io_awaiter{obj.platform_handle(), POLLOUT, executor::current()};
     }
-    
-  public: // TODO should not be public.
-    scheduler *scheduler_ptr_ = nullptr;
   };
 }
 
