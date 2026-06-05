@@ -33,7 +33,7 @@ namespace dripcore
   {
     bool was_empty = ready_queue_.empty();
     ready_queue_.push_back(h);
-    
+
     // Wake up the event loop if it was waiting
     if (was_empty) {
       event_loop_->trigger_wake_notification();
