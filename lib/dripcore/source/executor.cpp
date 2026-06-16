@@ -16,6 +16,7 @@ namespace dripcore
 
   executor::~executor()
   {
+    timer_queue_.clear();
     // event_loop_ automatically cleaned up by unique_ptr
   }
 
@@ -29,6 +30,16 @@ namespace dripcore
     event_loop_->register_event(fd, events, h);
   }
 
+  void executor::register_timer(std::chrono::steady_clock::time_point wake_time,
+                                std::coroutine_handle<> h)
+  {
+    timer_entry entry{wake_time, h};
+    timer_queue_.insert(entry);
+
+    // Wake up the event loop so it can recalculate the poll timeout
+    event_loop_->trigger_wake_notification();
+  }
+
   void executor::ready_task(std::coroutine_handle<> h)
   {
     bool was_empty = ready_queue_.empty();
@@ -38,6 +49,53 @@ namespace dripcore
     if (was_empty) {
       event_loop_->trigger_wake_notification();
     }
+  }
+
+  void executor::process_expired_timers()
+  {
+    auto now = std::chrono::steady_clock::now();
+
+    // Process all timers that have expired
+    while (!timer_queue_.empty())
+    {
+      auto it = timer_queue_.begin();
+      if (it->wake_time > now)
+      {
+        break; // No more expired timers
+      }
+
+      // Resume the coroutine
+      if (it->handle && !it->handle.done())
+      {
+        ready_task(it->handle);
+      }
+
+      timer_queue_.erase(it);
+    }
+  }
+
+  int executor::calculate_poll_timeout() const
+  {
+    if (timer_queue_.empty()) {
+      return 1000; // Default 1 second timeout
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    auto next_wake = timer_queue_.begin()->wake_time;
+
+    if (next_wake <= now) {
+      return 0; // Timer already expired, don't block
+    }
+
+    // Round up so a sub-millisecond remainder still blocks instead of
+    // busy-spinning with a zero timeout.
+    auto diff = std::chrono::ceil<std::chrono::milliseconds>(next_wake - now);
+
+    // Clamp to reasonable range (0 to 1000ms)
+    auto timeout_ms = static_cast<int>(diff.count());
+    if (timeout_ms < 0) return 0;
+    if (timeout_ms > 1000) return 1000;
+    return timeout_ms;
   }
 
   bool executor::process_ready_tasks()
@@ -63,19 +121,23 @@ namespace dripcore
     {
       bool had_ready_tasks = process_ready_tasks();
 
-      // Use zero timeout if we had ready tasks or more were added during processing.
-      // This ensures we don't block when there's CPU work to do, while still
-      // checking for I/O events to prevent starvation.
-      bool use_zero_timeout = had_ready_tasks || !ready_queue_.empty();
-      process_events(use_zero_timeout);
+      process_expired_timers();  // Catch timers expired between iterations.
+
+      // Calculate if we should use zero timeout
+      // Use zero timeout if we had ready tasks or more were added during processing,
+      // OR if we have timers that need to be checked soon
+      int timeout_ms = (had_ready_tasks || !ready_queue_.empty()) ? 0 : calculate_poll_timeout();
+
+      process_events(timeout_ms);
+      process_expired_timers();
 
       tasks_.remove_if([](const auto &t) { return t.done(); });
     }
   }
 
-  void executor::process_events(bool use_zero_timeout)
+  void executor::process_events(int timeout_ms)
   {
-    event_loop_->poll(use_zero_timeout, [this](void* ptr) {
+    event_loop_->poll(timeout_ms, [this](void* ptr) {
       resume_ptr(ptr);
     });
   }

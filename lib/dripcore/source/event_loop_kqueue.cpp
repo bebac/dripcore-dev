@@ -29,17 +29,20 @@ namespace dripcore
     kevent(kqueue_fd_, &kev, 1, nullptr, 0, nullptr);
   }
 
-  int event_loop_kqueue::poll(bool use_zero_timeout, std::function<void(void*)> resume_callback)
+  int event_loop_kqueue::poll(int timeout_ms, std::function<void(void*)> resume_callback)
   {
     struct kevent evs[32];
 
-    // Use zero timeout for non-blocking poll (when we have CPU work),
-    // otherwise use 1 second timeout (wake notification will interrupt)
-    struct timespec ts = use_zero_timeout ?
-      (struct timespec){0, 0} :      // zero (non-blocking)
-      (struct timespec){1, 0};       // 1 second
+    // timeout_ms: -1 = infinite (NULL timespec), 0 = non-blocking, >0 = wait up to timeout_ms
+    struct timespec ts;
+    struct timespec* ts_ptr = nullptr;
+    if (timeout_ms >= 0) {
+      ts.tv_sec = timeout_ms / 1000;
+      ts.tv_nsec = (timeout_ms % 1000) * 1000000;
+      ts_ptr = &ts;
+    }
 
-    int n = kevent(kqueue_fd_, nullptr, 0, evs, 32, &ts);
+    int n = kevent(kqueue_fd_, nullptr, 0, evs, 32, ts_ptr);
 
     for (int i = 0; i < n; i++)
     {

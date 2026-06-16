@@ -39,14 +39,11 @@ namespace dripcore
     }
   }
 
-  int event_loop_epoll::poll(bool use_zero_timeout, std::function<void(void*)> resume_callback)
+  int event_loop_epoll::poll(int timeout_ms, std::function<void(void*)> resume_callback)
   {
     struct epoll_event evs[32];
 
-    // Use zero timeout for non-blocking poll (when we have CPU work),
-    // otherwise use 1 second timeout (wake notification will interrupt)
-    int timeout_ms = use_zero_timeout ? 0 : 1000;
-
+    // timeout_ms: -1 = infinite, 0 = non-blocking, >0 = wait up to timeout_ms
     int n = epoll_wait(epoll_fd_, evs, 32, timeout_ms);
 
     for (int i = 0; i < n; i++)

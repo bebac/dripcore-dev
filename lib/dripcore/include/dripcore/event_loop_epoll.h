@@ -13,7 +13,7 @@ namespace dripcore
     ~event_loop_epoll() override;
 
     void register_event(int fd, short events, std::coroutine_handle<> h) override;
-    int poll(bool use_zero_timeout, std::function<void(void *)> resume_callback) override;
+    int poll(int timeout_ms, std::function<void(void *)> resume_callback) override;
     void setup_wake_notification() override;
     void trigger_wake_notification() override;
 

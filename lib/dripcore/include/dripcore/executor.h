@@ -13,6 +13,7 @@
 #include <optional>
 #include <iostream>
 #include <memory>
+#include <set>
 
 namespace dripcore
 {
@@ -21,7 +22,7 @@ namespace dripcore
   public:
     executor();
     ~executor();
-    
+
     // Get the current thread's executor (thread-local)
     static executor* current();
   public:
@@ -51,15 +52,27 @@ namespace dripcore
     }
   public:
     void register_event(int fd, short events, std::coroutine_handle<> h);
+    void register_timer(std::chrono::steady_clock::time_point wake_time, std::coroutine_handle<> h);
     void ready_task(std::coroutine_handle<> h);
     bool process_ready_tasks();
     void run();
   private:
-    void process_events(bool use_zero_timeout = false);
+    void process_events(int timeout_ms);
     void resume_ptr(void* ptr);
+    auto calculate_poll_timeout() const -> int;
+    void process_expired_timers();
   private:
     std::unique_ptr<event_loop> event_loop_;
     std::list<coroutine> tasks_;
+    struct timer_entry {
+      std::chrono::steady_clock::time_point wake_time;
+      std::coroutine_handle<> handle;
+
+      bool operator<(const timer_entry& other) const {
+        return wake_time < other.wake_time;
+      }
+    };
+    std::multiset<timer_entry> timer_queue_;
     std::vector<std::coroutine_handle<>> ready_queue_;
   };
 }

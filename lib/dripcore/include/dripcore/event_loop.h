@@ -17,10 +17,10 @@ namespace dripcore
     virtual void register_event(int fd, short events, std::coroutine_handle<> h) = 0;
 
     // Poll for I/O events and invoke callbacks for ready events
-    // use_zero_timeout: if true, don't block; if false, wait up to timeout_ms
+    // timeout_ms: maximum time to wait in milliseconds (0 = non-blocking, -1 = infinite)
     // Returns number of events processed
     virtual int poll(
-      bool use_zero_timeout,
+      int timeout_ms,
       std::function<void(void *)> resume_callback
     ) = 0;
 

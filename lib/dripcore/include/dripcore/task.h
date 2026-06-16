@@ -2,6 +2,7 @@
 #define DRIPCORE_TASK_H
 
 #include <dripcore/executor.h>
+#include <dripcore/sleep_awaiter.h>
 #include <concepts>
 
 namespace dripcore
@@ -25,7 +26,16 @@ namespace dripcore
     {
       return yield_awaiter{executor::current()};
     }
-    
+
+    template <typename Rep, typename Period>
+    auto sleep_for(std::chrono::duration<Rep, Period> duration)
+    {
+      return sleep_awaiter{
+        executor::current(),
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(duration)
+      };
+    }
+
     // Raw file descriptor overload
     auto readable(int fd)
     {
@@ -35,7 +45,7 @@ namespace dripcore
     {
       return io_awaiter{fd, POLLOUT, executor::current()};
     }
-    
+
     // Generic overload for any type with platform_handle()
     template<HasPlatformHandle T>
     auto readable(const T& obj)
