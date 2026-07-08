@@ -17,7 +17,7 @@ TEST_CASE("scheduler: basic task execution")
   {
   public:
     test_task(std::atomic<bool> &task_ran) : task_ran_(task_ran) {}
-    dripcore::coroutine execute()
+    dripcore::task_handle execute()
     {
       task_ran_ = true;
       co_await yield();
@@ -70,7 +70,7 @@ TEST_CASE_FIXTURE(PipeFixture, "scheduler: pipe communication")
   public:
     writer_task(int fd, std::atomic<bool>& done) : write_fd_(fd), done_(done) {}
 
-    dripcore::coroutine execute()
+    dripcore::task_handle execute()
     {
       const char *msg = "Hello from writer!";
 
@@ -96,7 +96,7 @@ TEST_CASE_FIXTURE(PipeFixture, "scheduler: pipe communication")
     reader_task(int fd, std::atomic<bool>& done)
         : read_fd_(fd), done_(done) {}
 
-    dripcore::coroutine execute()
+    dripcore::task_handle execute()
     {
       char buffer[256];
 
@@ -148,7 +148,7 @@ TEST_CASE_FIXTURE(PipeFixture, "scheduler: I/O tasks are not starved by CPU-boun
   public:
     cpu_task(std::atomic<int>& counter, int max) : counter_(counter), max_(max) {}
 
-    dripcore::coroutine execute()
+    dripcore::task_handle execute()
     {
       while (counter_ < max_)
       {
@@ -170,7 +170,7 @@ TEST_CASE_FIXTURE(PipeFixture, "scheduler: I/O tasks are not starved by CPU-boun
     io_task(int read_fd, int write_fd, std::atomic<bool>& done)
         : read_fd_(read_fd), write_fd_(write_fd), done_(done) {}
 
-    dripcore::coroutine execute()
+    dripcore::task_handle execute()
     {
       // First write to the pipe so there's data to read
       const char *msg = "test";

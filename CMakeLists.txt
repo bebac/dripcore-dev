@@ -28,7 +28,7 @@ else()
 endif()
 
 add_library(core STATIC
-    lib/dripcore/source/coroutine.cpp
+    lib/dripcore/source/task_handle.cpp
     lib/dripcore/source/executor.cpp
     lib/dripcore/source/scheduler.cpp
     lib/dripcore/source/yield_awaiter.cpp

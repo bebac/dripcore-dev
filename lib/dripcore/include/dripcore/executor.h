@@ -1,7 +1,7 @@
 #ifndef DRIPCORE_EXECUTOR_H
 #define DRIPCORE_EXECUTOR_H
 
-#include <dripcore/coroutine.h>
+#include <dripcore/task_handle.h>
 #include <dripcore/event_loop.h>
 //#include <dripcore/event.h>
 #include <vector>
@@ -63,7 +63,7 @@ namespace dripcore
     void process_expired_timers();
   private:
     std::unique_ptr<event_loop> event_loop_;
-    std::list<coroutine> tasks_;
+    std::list<task_handle> tasks_;
     struct timer_entry {
       std::chrono::steady_clock::time_point wake_time;
       std::coroutine_handle<> handle;

@@ -1,19 +1,19 @@
-#include "dripcore/coroutine.h"
+#include "dripcore/task_handle.h"
 #include "dripcore/executor.h"
 
 namespace dripcore
 {
-  coroutine::coroutine()
+  task_handle::task_handle()
     : handle_(nullptr)
   {
   }
 
-  coroutine::coroutine(std::coroutine_handle<promise_type> handle)
+  task_handle::task_handle(std::coroutine_handle<promise_type> handle)
     : handle_(handle)
   {
   }
 
-  coroutine::~coroutine()
+  task_handle::~task_handle()
   {
     if (handle_)
     {
@@ -21,18 +21,18 @@ namespace dripcore
     }
   }
 
-  coroutine::coroutine(coroutine &&other) noexcept
+  task_handle::task_handle(task_handle &&other) noexcept
     : handle_(other.handle_)
   {
     other.handle_ = nullptr;
   }
 
-  bool coroutine::done() const
+  bool task_handle::done() const
   {
     return handle_.done();
   }
 
-  void coroutine::set_holder(std::shared_ptr<void> ptr)
+  void task_handle::set_holder(std::shared_ptr<void> ptr)
   {
     auto &promise = handle_.promise();
     promise.holder_ptr = ptr;

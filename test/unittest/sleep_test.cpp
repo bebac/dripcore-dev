@@ -21,7 +21,7 @@ TEST_CASE("sleep: basic sleep_for test" * doctest::timeout(1))
   {
   public:
     sleep_task(std::atomic<bool>& flag) : flag_(flag) {}
-    dripcore::coroutine execute()
+    dripcore::task_handle execute()
     {
       co_await sleep_for(std::chrono::milliseconds(50));
       flag_ = true;
@@ -55,7 +55,7 @@ TEST_CASE("sleep: multiple sleep tasks" * doctest::timeout(1))
   public:
     counting_task(std::atomic<int>& counter, int delay_ms)
         : counter_(counter), delay_ms_(delay_ms) {}
-    dripcore::coroutine execute()
+    dripcore::task_handle execute()
     {
       co_await sleep_for(std::chrono::milliseconds(delay_ms_));
       counter_++;
@@ -100,7 +100,7 @@ TEST_CASE("sleep: tasks complete in order of sleep duration")
     sleep_task(std::shared_ptr<shared_state> state,
                const std::string &name, int sleep_ms)
         : state_(state), name_(name), sleep_ms_(sleep_ms) {}
-    dripcore::coroutine execute()
+    dripcore::task_handle execute()
     {
       {
         std::lock_guard<std::mutex> lock(state_->mtx);

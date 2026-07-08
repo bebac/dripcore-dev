@@ -1,5 +1,5 @@
-#ifndef DRIPCORE_COROUTINE_H
-#define DRIPCORE_COROUTINE_H
+#ifndef DRIPCORE_TASK_HANDLE_H
+#define DRIPCORE_TASK_HANDLE_H
 
 #include <dripcore/yield_awaiter.h>
 #include <dripcore/io_awaiter.h>
@@ -20,15 +20,15 @@ namespace dripcore
   using platform_fd_type = int;
 #endif
 
-  class coroutine
+  class task_handle
   {
     friend class executor;
   public:
     struct promise_type
     {
       std::shared_ptr<void> holder_ptr;
-      coroutine get_return_object() {
-        return coroutine{std::coroutine_handle<promise_type>::from_promise(*this)};
+      task_handle get_return_object() {
+        return task_handle{std::coroutine_handle<promise_type>::from_promise(*this)};
       }
       std::suspend_always initial_suspend() noexcept { return {}; }
       std::suspend_always final_suspend() noexcept { return {}; }
@@ -37,15 +37,15 @@ namespace dripcore
     };
   public:
     // Constructors.
-    coroutine();
-    explicit coroutine(std::coroutine_handle<promise_type> handle);
+    task_handle();
+    explicit task_handle(std::coroutine_handle<promise_type> handle);
     // Destructors.
-    virtual ~coroutine();
+    virtual ~task_handle();
   public:
     // Copy Constructors.
-    coroutine(const coroutine &) = delete;
-    coroutine &operator=(const coroutine &) = delete;
-    coroutine(coroutine &&other) noexcept;
+    task_handle(const task_handle &) = delete;
+    task_handle &operator=(const task_handle &) = delete;
+    task_handle(task_handle &&other) noexcept;
   public:
     bool done() const;
   private:
