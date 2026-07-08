@@ -50,23 +50,12 @@ set_target_properties(core PROPERTIES
 )
 
 # -----------------------------------------------
-# Test
+# Test Infrastructure
 # -----------------------------------------------
 
-# Find and include all .cpp files in the ./test directory
-file(GLOB TEST_SOURCES "test/*.cpp")
-
-add_executable(doctest
-    ${TEST_SOURCES}
-)
-
-target_compile_features(doctest PRIVATE cxx_std_20)
-
-target_link_libraries(doctest PRIVATE core)
-
-set_target_properties(doctest PROPERTIES
-    INTERPROCEDURAL_OPTIMIZATION TRUE
-)
+# Include test subdirectories
+add_subdirectory(test/unittest)
+add_subdirectory(test/benchmark)
 
 # -----------------------------------------------
 # Main application
@@ -91,4 +80,7 @@ target_link_libraries(dripcore PRIVATE core)
 # Enable testing
 # -----------------------------------------------
 include(CTest)
-add_test(NAME run_tests COMMAND doctest)
+
+add_test(NAME unittest COMMAND test/unittest/unittest)
+add_test(NAME benchmark COMMAND test/benchmark/benchmark)
+

@@ -7,8 +7,11 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+#include <unistd.h>
+#include <fcntl.h>
+#include <cstring>
 
-TEST_CASE("sleep_for basic test")
+TEST_CASE("sleep: basic sleep_for test" * doctest::timeout(1))
 {
   dripcore::scheduler scheduler;
 
@@ -18,11 +21,13 @@ TEST_CASE("sleep_for basic test")
   {
   public:
     sleep_task(std::atomic<bool>& flag) : flag_(flag) {}
-    dripcore::coroutine execute() {
+    dripcore::coroutine execute()
+    {
       co_await sleep_for(std::chrono::milliseconds(50));
       flag_ = true;
       co_return;
     }
+
   private:
     std::atomic<bool>& flag_;
   };
@@ -39,51 +44,26 @@ TEST_CASE("sleep_for basic test")
   CHECK(elapsed.count() < 200); // Shouldn't take too much longer
 }
 
-#if 0 // No free functions yet
-TEST_CASE("sleep_for with free function")
+TEST_CASE("sleep: multiple sleep tasks" * doctest::timeout(1))
 {
   dripcore::scheduler scheduler;
 
-  bool task_ran = false;
-
-  class free_sleep_task : public dripcore::task
-  {
-  public:
-    free_sleep_task(bool& flag) : flag_(flag) {}
-    dripcore::coroutine execute() {
-      co_await dripcore::sleep_for(std::chrono::milliseconds(50));
-      flag_ = true;
-      co_return;
-    }
-  private:
-    bool& flag_;
-  };
-
-  scheduler.spawn<free_sleep_task>(task_ran);
-  scheduler.run();
-
-  CHECK(task_ran == true);
-}
-#endif
-
-TEST_CASE("multiple sleep tasks")
-{
-  dripcore::scheduler scheduler;
-
-  int counter = 0;
+  std::atomic<int> counter = 0;
 
   class counting_task : public dripcore::task
   {
   public:
-    counting_task(int& counter, int delay_ms)
-      : counter_(counter), delay_ms_(delay_ms) {}
-    dripcore::coroutine execute() {
+    counting_task(std::atomic<int>& counter, int delay_ms)
+        : counter_(counter), delay_ms_(delay_ms) {}
+    dripcore::coroutine execute()
+    {
       co_await sleep_for(std::chrono::milliseconds(delay_ms_));
       counter_++;
       co_return;
     }
+
   private:
-    int& counter_;
+    std::atomic<int>& counter_;
     int delay_ms_;
   };
 
@@ -104,44 +84,64 @@ TEST_CASE("multiple sleep tasks")
   CHECK(elapsed.count() < 400);
 }
 
-TEST_CASE("sleep_for with yield interleaving")
+TEST_CASE("sleep: tasks complete in order of sleep duration")
 {
   dripcore::scheduler scheduler;
 
-  std::vector<std::string> order;
+  struct shared_state {
+    std::mutex mtx;
+    std::vector<std::string> order;
+  };
+  auto state = std::make_shared<shared_state>();
 
-  class interleaved_task : public dripcore::task
+  class sleep_task : public dripcore::task
   {
   public:
-    interleaved_task(std::vector<std::string>& order, const std::string& name, int sleep_ms)
-      : order_(order), name_(name), sleep_ms_(sleep_ms) {}
-    dripcore::coroutine execute() {
-      order_.push_back(name_ + "-start");
+    sleep_task(std::shared_ptr<shared_state> state,
+               const std::string &name, int sleep_ms)
+        : state_(state), name_(name), sleep_ms_(sleep_ms) {}
+    dripcore::coroutine execute()
+    {
+      {
+        std::lock_guard<std::mutex> lock(state_->mtx);
+        state_->order.push_back(name_ + "-start");
+      }
       co_await sleep_for(std::chrono::milliseconds(sleep_ms_));
-      order_.push_back(name_ + "-end");
+      {
+        std::lock_guard<std::mutex> lock(state_->mtx);
+        state_->order.push_back(name_ + "-end");
+      }
       co_return;
     }
+
   private:
-    std::vector<std::string>& order_;
+    std::shared_ptr<shared_state> state_;
     std::string name_;
     int sleep_ms_;
   };
 
-  scheduler.spawn<interleaved_task>(order, "A", 100);
-  scheduler.spawn<interleaved_task>(order, "B", 50);
-  scheduler.spawn<interleaved_task>(order, "C", 0);
+  scheduler.spawn<sleep_task>(state, "A", 100);
+  scheduler.spawn<sleep_task>(state, "B", 50);
+  scheduler.spawn<sleep_task>(state, "C", 0);
 
   scheduler.run();
 
-  // C should finish first (0ms sleep)
-  bool valid_start = (order[0] == "A-start" || order[0] == "B-start" || order[0] == "C-start");
-  CHECK(valid_start);
-  // All should have started
+  auto& order = state->order;
+
+  // All tasks should have started
   CHECK(std::find(order.begin(), order.end(), "A-start") != order.end());
   CHECK(std::find(order.begin(), order.end(), "B-start") != order.end());
   CHECK(std::find(order.begin(), order.end(), "C-start") != order.end());
-  // All should have ended
+
+  // All tasks should have ended
   CHECK(std::find(order.begin(), order.end(), "A-end") != order.end());
   CHECK(std::find(order.begin(), order.end(), "B-end") != order.end());
   CHECK(std::find(order.begin(), order.end(), "C-end") != order.end());
+
+  // C (0ms) should finish before B (50ms) and A (100ms)
+  auto c_end = std::find(order.begin(), order.end(), "C-end");
+  auto b_end = std::find(order.begin(), order.end(), "B-end");
+  auto a_end = std::find(order.begin(), order.end(), "A-end");
+  CHECK(c_end < b_end);  // C finishes before B
+  CHECK(c_end < a_end);  // C finishes before A
 }

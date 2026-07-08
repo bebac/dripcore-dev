@@ -25,5 +25,10 @@ clean:
 # Rebuild after changes
 rebld: clean build
 
+# Run unit tests
+unittest: build
+	$(CMAKE_BINARY_DIR)/test/unittest/unittest
+
 # Add the sentinel file to the list of PHONY targets if you might want to call it directly
-.PHONY: build clean rebld all
+.PHONY: build clean rebld all unittest
+
