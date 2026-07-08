@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 
 TEST_CASE("scheduler: basic task execution")
 {
@@ -202,3 +203,4 @@ TEST_CASE_FIXTURE(PipeFixture, "scheduler: I/O tasks are not starved by CPU-boun
   CHECK(cpu_task_yields == max_yields);
   CHECK(io_task_completed == true);
 }
+
