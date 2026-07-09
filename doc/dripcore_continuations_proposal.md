@@ -7,7 +7,7 @@ tags: [dripcore, c++, coroutines, async, design, implementation, multithreading]
 
 ## Summary
 
-This document proposes adding **continuation support** to dripcore, enabling composable coroutine-based tasks that can `co_await` each other. This addresses the current limitation where `dripcore::coroutine` cannot be awaited, forcing all logic into monolithic `execute()` methods.
+This document proposes adding **continuation support** to dripcore, enabling composable coroutine-based tasks that can `co_await` each other. This addresses the current limitation where `dripcore::task_handle` cannot be awaited, forcing all logic into monolithic `execute()` methods.
 
 ## Problem Statement
 
@@ -16,7 +16,7 @@ Currently in dripcore:
 ```cpp
 class my_task : public dripcore::task {
 public:
-    dripcore::coroutine execute() {
+    dripcore::task_handle execute() {
         // All logic must be in this single function
         // Cannot extract helper coroutines
         // Cannot co_await other tasks
@@ -27,7 +27,7 @@ public:
 ```
 
 **Key Limitations:**
-- `dripcore::coroutine` is a handle wrapper, not an awaitable type
+- `dripcore::task_handle` is a handle wrapper, not an awaitable type
 - No mechanism to wait for task completion
 - No way to compose smaller coroutines
 - Forces monolithic task implementations
@@ -220,7 +220,7 @@ public:
     network_task(std::string host, int port)
         : host_(std::move(host)), port_(port) {}
 
-    dripcore::coroutine execute() {
+    dripcore::task_handle execute() {
         while (auto req = co_await request_ch_->recv()) {
             if (!req) break;
 
@@ -259,7 +259,7 @@ class data_fetcher_task : public dripcore::task {
 public:
     data_fetcher_task(int fd) : fd_(fd) {}
 
-    dripcore::coroutine execute() {
+    dripcore::task_handle execute() {
         try {
             std::string data = co_await fetch_data(fd_);
             std::cout << "Got: " << data << std::endl;
@@ -290,7 +290,7 @@ dripcore::awaitable<int> parse_response() {
 // Task class with error handling
 class api_task : public dripcore::task {
 public:
-    dripcore::coroutine execute() {
+    dripcore::task_handle execute() {
         try {
             int status = co_await parse_response();
             std::cout << "Status: " << status << std::endl;
@@ -442,7 +442,7 @@ co_await connect_task();  // Just works! Auto-spawned.
 
 ### Backward Compatibility
 
-The existing `dripcore::task` base class and `dripcore::coroutine` type remain **completely unchanged**. The new `dripcore::awaitable<T>` is an **additional** type that provides awaitable behavior.
+The existing `dripcore::task` base class and `dripcore::task_handle` type remain **completely unchanged**. The new `dripcore::awaitable<T>` is an **additional** type that provides awaitable behavior.
 
 Existing code continues to work:
 
@@ -450,7 +450,7 @@ Existing code continues to work:
 // Old style still works perfectly
 class old_task : public dripcore::task {
 public:
-    dripcore::coroutine execute() {
+    dripcore::task_handle execute() {
         // ... existing code ...
         co_await readable(fd);
         // ... more existing code ...
