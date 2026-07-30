@@ -15,7 +15,7 @@ namespace dripcore
 
   class task
   {
-  protected:
+  public:
     template <typename T, typename... Args>
     void spawn(Args &&...args)
     {
