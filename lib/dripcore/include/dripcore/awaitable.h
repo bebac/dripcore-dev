@@ -5,7 +5,6 @@
 
 #include <coroutine>
 #include <vector>
-#include <thread>
 #include <exception>
 #include <memory>
 #include <cassert>
@@ -49,15 +48,26 @@ namespace dripcore
     std::shared_ptr<void> holder_ptr;
     std::exception_ptr exception_;
     std::vector<std::coroutine_handle<>> continuations_;
-    std::thread::id creating_thread_;
 
-    awaitable_promise_base() : creating_thread_(std::this_thread::get_id()) {}
+    // Executor-affinity (not thread-affinity): the executor on which this
+    // awaitable was created. Under the executor-pinning model a task never
+    // migrates executors after first resume, so the awaitable is only ever
+    // awaited on this same executor. Binding to the executor (rather than the
+    // OS thread) is what permits work-stealing of not-yet-started tasks while
+    // keeping continuations_ single-threaded and lock-free.
+    // See doc/shutdown_and_cancellation_design.md (Design Principle 3).
+    executor* creating_executor_;
+
+    awaitable_promise_base() : creating_executor_(executor::current()) {}
 
     std::suspend_always initial_suspend() noexcept { return {}; }
 
     std::suspend_always final_suspend() noexcept
     {
-      // Notify all continuations directly from the promise
+      // Notify all continuations directly from the promise.
+      // Intentionally use executor::current() (not creating_executor_): under
+      // executor-pinning the two are equal, and routing through current()
+      // avoids manufacturing a cross-executor scheduling path.
       for (auto h : continuations_)
       {
         if (h && !h.done())
@@ -117,9 +127,9 @@ namespace dripcore
   template<typename T>
   void awaitable<T>::await_suspend(std::coroutine_handle<> awaiting)
   {
-    // Thread-affinity check - MUST be on same thread as creation
-    assert(std::this_thread::get_id() == handle_.promise().creating_thread_ &&
-           "Awaitable must be created and awaited on the same thread");
+    // Executor-affinity check - MUST be awaited on the executor it was created on.
+    assert(executor::current() == handle_.promise().creating_executor_ &&
+           "Awaitable must be created and awaited on the same executor");
 
     if (!handle_.done())
     {
@@ -153,9 +163,9 @@ namespace dripcore
   {
     if (handle_ && !handle_.done())
     {
-      // Thread-affinity check
-      assert(std::this_thread::get_id() == handle_.promise().creating_thread_ &&
-             "Awaitable must be created and awaited on the same thread");
+      // Executor-affinity check
+      assert(executor::current() == handle_.promise().creating_executor_ &&
+             "Awaitable must be created and awaited on the same executor");
 
       // Auto-spawn: Schedule the coroutine on the current executor
       executor::current()->ready_task(handle_);
