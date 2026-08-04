@@ -106,9 +106,8 @@ namespace dripcore
 
     for (auto h : to_run)
     {
-      if (h && !h.done())
-      {
-        h.resume();
+      if (h && !h.done()) {
+        resume(h);
       }
     }
 
@@ -145,7 +144,19 @@ namespace dripcore
   void executor::resume_ptr(void *ptr)
   {
     if (ptr) {
-      std::coroutine_handle<>::from_address(ptr).resume();
+      auto h = std::coroutine_handle<>::from_address(ptr);
+      resume(h);
     }
+  }
+
+  void executor::resume(std::coroutine_handle<> h)
+  {
+    // Body exceptions are captured by the coroutine promise's
+    // unhandled_exception(). Because initial_suspend() is suspend_always, the
+    // body always executes inside the coroutine's implicit try block on the
+    // first resume, so resume() does not rethrow for a well-formed task.
+    // This single choke point is kept for the upcoming cancellation
+    // double-resume guard.
+    h.resume();
   }
 }

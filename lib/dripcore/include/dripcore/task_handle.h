@@ -7,6 +7,7 @@
 #include <coroutine>
 #include <memory>
 #include <iostream>
+#include <exception>
 
 #include <poll.h>
 
@@ -27,13 +28,20 @@ namespace dripcore
     struct promise_type
     {
       std::shared_ptr<void> holder_ptr;
+      std::exception_ptr exception_;
+
       task_handle get_return_object() {
         return task_handle{std::coroutine_handle<promise_type>::from_promise(*this)};
       }
       std::suspend_always initial_suspend() noexcept { return {}; }
       std::suspend_always final_suspend() noexcept { return {}; }
       void return_void() {}
-      void unhandled_exception() { std::terminate(); }
+      void unhandled_exception() {
+        // Capture exception instead of terminating.
+        // This enables cancellation (dripcore::cancelled) and error handling.
+        // See doc/shutdown_and_cancellation_design.md §4.
+        exception_ = std::current_exception();
+      }
     };
   public:
     // Constructors.

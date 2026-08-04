@@ -59,6 +59,7 @@ namespace dripcore
   private:
     void process_events(int timeout_ms);
     void resume_ptr(void* ptr);
+    void resume(std::coroutine_handle<> h);
     auto calculate_poll_timeout() const -> int;
     void process_expired_timers();
   private:

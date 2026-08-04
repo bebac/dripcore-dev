@@ -1,6 +1,7 @@
 #include "doctest/doctest.h"
 #include "dripcore/scheduler.h"
 #include "dripcore/task.h"
+#include "dripcore/cancelled.h"
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -203,4 +204,105 @@ TEST_CASE_FIXTURE(PipeFixture, "scheduler: I/O tasks are not starved by CPU-boun
   CHECK(cpu_task_yields == max_yields);
   CHECK(io_task_completed == true);
 }
+
+TEST_CASE("scheduler: task exceptions are captured, not terminated")
+{
+  // This test verifies that when a task throws an exception, the process
+  // does not terminate. The exception is captured in the task promise.
+  // See doc/shutdown_and_cancellation_design.md §4.
+
+  dripcore::scheduler scheduler;
+  std::atomic<bool> task_started{false};
+  std::atomic<bool> task_completed{false};
+
+  class throwing_task : public dripcore::task
+  {
+  public:
+    throwing_task(std::atomic<bool>& started, std::atomic<bool>& completed)
+      : started_(started), completed_(completed) {}
+
+    dripcore::task_handle execute()
+    {
+      started_ = true;
+      co_await yield();
+      throw std::runtime_error("test exception");
+      completed_ = true; // should not reach here
+    }
+
+  private:
+    std::atomic<bool>& started_;
+    std::atomic<bool>& completed_;
+  };
+
+  scheduler.spawn<throwing_task>(task_started, task_completed);
+  scheduler.run(); // should not terminate
+
+  CHECK(task_started == true);
+  CHECK(task_completed == false); // exception prevented normal completion
+}
+
+TEST_CASE("scheduler: dripcore::cancelled exception is captured")
+{
+  // Verify that dripcore::cancelled (the cancellation exception) is captured
+  // like any other exception, not terminated. This is the foundation for the
+  // cancellation protocol in doc/shutdown_and_cancellation_design.md.
+
+  dripcore::scheduler scheduler;
+  std::atomic<bool> task_ran{false};
+
+  class cancelled_task : public dripcore::task
+  {
+  public:
+    cancelled_task(std::atomic<bool>& ran) : ran_(ran) {}
+
+    dripcore::task_handle execute()
+    {
+      ran_ = true;
+      co_await yield();
+      throw dripcore::cancelled{};
+    }
+
+  private:
+    std::atomic<bool>& ran_;
+  };
+
+  scheduler.spawn<cancelled_task>(task_ran);
+  scheduler.run(); // should not terminate
+
+  CHECK(task_ran == true);
+}
+
+TEST_CASE("scheduler: exception thrown before first co_await is captured")
+{
+  // A task that throws before any body-level suspension is still fully handled
+  // by unhandled_exception(), provided it is a real coroutine (contains a co_*
+  // keyword). No executor-side try/catch is required: because initial_suspend()
+  // is suspend_always, the body runs inside the coroutine's implicit try block
+  // on the first resume.
+
+  dripcore::scheduler scheduler;
+  std::atomic<bool> task_ran{false};
+
+  class early_throw_task : public dripcore::task
+  {
+  public:
+    early_throw_task(std::atomic<bool>& ran) : ran_(ran) {}
+
+    dripcore::task_handle execute()
+    {
+      ran_ = true;
+      throw std::runtime_error("thrown before first co_await");
+      co_return; // unreachable; present only to make execute() a coroutine
+    }
+
+  private:
+    std::atomic<bool>& ran_;
+  };
+
+  scheduler.spawn<early_throw_task>(task_ran);
+  scheduler.run(); // must not terminate
+
+  CHECK(task_ran == true);
+}
+
 
