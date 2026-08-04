@@ -12,7 +12,8 @@ namespace dripcore
     event_loop_kqueue();
     ~event_loop_kqueue() override;
 
-    void register_event(int fd, short events, std::coroutine_handle<> h) override;
+    void register_event(int fd, short events, void* udata) override;
+    void deregister_event(int fd, short events) override;
     int poll(int timeout_ms, std::function<void(void *)> resume_callback) override;
     void setup_wake_notification() override;
     void trigger_wake_notification() override;

@@ -1,4 +1,6 @@
 #include <dripcore/executor.h>
+#include <dripcore/io_awaiter.h>
+#include <dripcore/sleep_awaiter.h>
 #include <system_error>
 #include <algorithm>
 
@@ -25,19 +27,100 @@ namespace dripcore
     return current_executor;
   }
 
-  void executor::register_event(int fd, short events, std::coroutine_handle<> h)
-  {
-    event_loop_->register_event(fd, events, h);
-  }
-
   void executor::register_timer(std::chrono::steady_clock::time_point wake_time,
-                                std::coroutine_handle<> h)
+                                std::coroutine_handle<> h,
+                                sleep_awaiter* awaiter)
   {
-    timer_entry entry{wake_time, h};
+    timer_entry entry{wake_time, h, awaiter};
     timer_queue_.insert(entry);
 
     // Wake up the event loop so it can recalculate the poll timeout
     event_loop_->trigger_wake_notification();
+  }
+
+  void executor::register_io(io_awaiter* a)
+  {
+    // Link into the intrusive pending-io list (O(1), single-threaded).
+    a->prev_ = nullptr;
+    a->next_ = io_head_;
+    if (io_head_) {
+      io_head_->prev_ = a;
+    }
+    io_head_ = a;
+    a->linked_ = true;
+
+    // Arm the kernel with the awaiter as udata so poll() hands it back.
+    event_loop_->register_event(a->fd_, a->events_, a);
+  }
+
+  bool executor::unlink_io(io_awaiter* a)
+  {
+    if (!a->linked_) {
+      return false;
+    }
+    if (a->prev_) {
+      a->prev_->next_ = a->next_;
+    } else {
+      io_head_ = a->next_;
+    }
+    if (a->next_) {
+      a->next_->prev_ = a->prev_;
+    }
+    a->prev_ = a->next_ = nullptr;
+    a->linked_ = false;
+    return true;
+  }
+
+  void executor::deregister_io(io_awaiter* a)
+  {
+    // Called from ~io_awaiter. If still armed, remove the registration from the
+    // event loop (kqueue EV_DELETE / epoll EPOLL_CTL_DEL).
+    if (unlink_io(a)) {
+      event_loop_->deregister_event(a->fd_, a->events_);
+    }
+  }
+
+  void executor::on_io_event(io_awaiter* a)
+  {
+    // A readiness event was delivered. The backend disarmed this registration
+    // on delivery (kqueue EV_ONESHOT removes it; epoll EPOLLONESHOT disables
+    // it), so it will not fire again until re-armed. Once-only guard: only
+    // resume if still linked, so a concurrent cancel in the same poll batch
+    // cannot cause a double resume.
+    if (unlink_io(a)) {
+      resume(a->handle_);
+    }
+  }
+
+  std::size_t executor::cancel_pending()
+  {
+    std::size_t count = 0;
+
+    // Cancel all pending I/O waits: mark cancelled, remove the kernel
+    // registration, then schedule the coroutine to resume (it will throw
+    // dripcore::cancelled from io_awaiter::await_resume).
+    while (io_head_) {
+      io_awaiter* a = io_head_;
+      a->cancelled_ = true;
+      unlink_io(a);                                     // advances io_head_
+      event_loop_->deregister_event(a->fd_, a->events_);
+      ready_task(a->handle_);
+      ++count;
+    }
+
+    // Cancel all pending timers (sleepers).
+    for (auto it = timer_queue_.begin(); it != timer_queue_.end(); ++it) {
+      if (it->awaiter) {
+        it->awaiter->cancelled_ = true;
+      }
+      if (it->handle && !it->handle.done()) {
+        ready_task(it->handle);
+      }
+      ++count;
+    }
+    timer_queue_.clear();
+
+    return count;
   }
 
   void executor::ready_task(std::coroutine_handle<> h)
@@ -137,16 +220,9 @@ namespace dripcore
   void executor::process_events(int timeout_ms)
   {
     event_loop_->poll(timeout_ms, [this](void* ptr) {
-      resume_ptr(ptr);
+      // udata is the io_awaiter* registered in register_io().
+      on_io_event(static_cast<io_awaiter*>(ptr));
     });
-  }
-
-  void executor::resume_ptr(void *ptr)
-  {
-    if (ptr) {
-      auto h = std::coroutine_handle<>::from_address(ptr);
-      resume(h);
-    }
   }
 
   void executor::resume(std::coroutine_handle<> h)

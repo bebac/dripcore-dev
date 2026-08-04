@@ -12,6 +12,7 @@ namespace dripcore
   {
     executor *exec_ptr_;
     std::chrono::steady_clock::time_point wake_time_;
+    bool cancelled_ = false;   // set by executor on cancel
 
     sleep_awaiter(executor *exec, std::chrono::steady_clock::duration duration)
       :
@@ -22,7 +23,8 @@ namespace dripcore
 
     bool await_ready() const noexcept { return false; }
     void await_suspend(std::coroutine_handle<> h);
-    void await_resume() noexcept {}
+    // Throws dripcore::cancelled if the sleep was cancelled. Out-of-line.
+    void await_resume();
   };
 }
 

@@ -25,18 +25,29 @@ namespace dripcore
     }
   }
 
-  void event_loop_epoll::register_event(int fd, short events, std::coroutine_handle<> h)
+  void event_loop_epoll::register_event(int fd, short events, void* udata)
   {
     struct epoll_event ev;
 
     ev.events = ((events & POLLIN) ? EPOLLIN : EPOLLOUT) | EPOLLONESHOT;
-    ev.data.ptr = h.address();
+    ev.data.ptr = udata;
 
+    // EEXIST can occur because EPOLLONESHOT only *disables* a fired entry
+    // (it stays in the interest set); re-arming it is a MOD, not an ADD.
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) == -1) {
       if (errno == EEXIST) {
         epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev);
       }
     }
+  }
+
+  void event_loop_epoll::deregister_event(int fd, short /*events*/)
+  {
+    // Unlike kqueue's EV_ONESHOT (which removes the knote on delivery),
+    // EPOLLONESHOT only disables the fd, so an explicit DEL is required to
+    // fully deregister. Safe to call if the fd is absent (ENOENT ignored);
+    // epoll is fd-level so the events mask is not needed here.
+    (void)epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
   }
 
   int event_loop_epoll::poll(int timeout_ms, std::function<void(void*)> resume_callback)

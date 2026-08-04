@@ -14,9 +14,13 @@
 #include <iostream>
 #include <memory>
 #include <set>
+#include <cstddef>
 
 namespace dripcore
 {
+  struct io_awaiter;
+  struct sleep_awaiter;
+
   class executor
   {
   public:
@@ -51,14 +55,29 @@ namespace dripcore
       ready_task(r.handle_);
     }
   public:
-    void register_event(int fd, short events, std::coroutine_handle<> h);
-    void register_timer(std::chrono::steady_clock::time_point wake_time, std::coroutine_handle<> h);
+    void register_timer(std::chrono::steady_clock::time_point wake_time,
+                        std::coroutine_handle<> h,
+                        sleep_awaiter* awaiter = nullptr);
     void ready_task(std::coroutine_handle<> h);
     bool process_ready_tasks();
     void run();
+
+    // --- I/O wait registry (used by io_awaiter) ---
+    // Arm the event loop and link the awaiter into the pending-io list.
+    void register_io(io_awaiter* a);
+    // Unlink + EV_DELETE if still armed. Called from ~io_awaiter.
+    void deregister_io(io_awaiter* a);
+
+    // --- Cancellation ---
+    // Cancel every pending I/O wait and timer: mark each awaiter cancelled,
+    // remove its kernel/timer registration, and schedule it to resume (where
+    // it will throw dripcore::cancelled). Returns the number cancelled.
+    // This is the primitive the shutdown protocol and task_control build on.
+    std::size_t cancel_pending();
   private:
     void process_events(int timeout_ms);
-    void resume_ptr(void* ptr);
+    void on_io_event(io_awaiter* a);   // poll() callback: once-only resume
+    bool unlink_io(io_awaiter* a);     // returns true if it was linked
     void resume(std::coroutine_handle<> h);
     auto calculate_poll_timeout() const -> int;
     void process_expired_timers();
@@ -68,6 +87,7 @@ namespace dripcore
     struct timer_entry {
       std::chrono::steady_clock::time_point wake_time;
       std::coroutine_handle<> handle;
+      sleep_awaiter* awaiter = nullptr;   // for cancellation (may be null)
 
       bool operator<(const timer_entry& other) const {
         return wake_time < other.wake_time;
@@ -75,6 +95,7 @@ namespace dripcore
     };
     std::multiset<timer_entry> timer_queue_;
     std::vector<std::coroutine_handle<>> ready_queue_;
+    io_awaiter* io_head_ = nullptr;   // head of intrusive pending-io list
   };
 }
 

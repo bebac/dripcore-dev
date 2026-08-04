@@ -9,6 +9,8 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <cstddef>
+#include <chrono>
 
 TEST_CASE("scheduler: basic task execution")
 {
@@ -303,6 +305,121 @@ TEST_CASE("scheduler: exception thrown before first co_await is captured")
   scheduler.run(); // must not terminate
 
   CHECK(task_ran == true);
+}
+
+TEST_CASE_FIXTURE(PipeFixture,
+  "scheduler: pending I/O wait is cancelled via cancel_pending"
+  * doctest::timeout(2))
+{
+  // A task suspended on readable(fd) for a pipe that never becomes readable is
+  // woken by cancel_pending(): its knote is removed (EV_DELETE) and the
+  // coroutine is resumed so io_awaiter::await_resume throws dripcore::cancelled.
+  // Without this, the task would block forever and run() would never return.
+
+  dripcore::scheduler scheduler;
+  std::atomic<bool> was_cancelled{false};
+  std::atomic<bool> read_completed{false};
+  std::atomic<std::size_t> cancelled_count{0};
+
+  class reader_task : public dripcore::task
+  {
+  public:
+    reader_task(int fd, std::atomic<bool>& cancelled, std::atomic<bool>& completed)
+      : fd_(fd), cancelled_(cancelled), completed_(completed) {}
+
+    dripcore::task_handle execute()
+    {
+      try {
+        co_await readable(fd_);   // pipe never becomes readable
+        completed_ = true;        // must not be reached
+      } catch (const dripcore::cancelled&) {
+        cancelled_ = true;
+      }
+      co_return;
+    }
+
+  private:
+    int fd_;
+    std::atomic<bool>& cancelled_;
+    std::atomic<bool>& completed_;
+  };
+
+  class canceller_task : public dripcore::task
+  {
+  public:
+    canceller_task(std::atomic<std::size_t>& count) : count_(count) {}
+
+    dripcore::task_handle execute()
+    {
+      // Let the reader park on its io wait first, then cancel.
+      co_await sleep_for(std::chrono::milliseconds(10));
+      count_ = dripcore::executor::current()->cancel_pending();
+      co_return;
+    }
+
+  private:
+    std::atomic<std::size_t>& count_;
+  };
+
+  scheduler.spawn<reader_task>(pipefd[0], was_cancelled, read_completed);
+  scheduler.spawn<canceller_task>(cancelled_count);
+  scheduler.run();
+
+  CHECK(was_cancelled == true);
+  CHECK(read_completed == false);
+  CHECK(cancelled_count >= 1);
+}
+
+TEST_CASE("scheduler: sleeping task is cancelled via cancel_pending"
+  * doctest::timeout(2))
+{
+  // A task blocked in a long sleep_for() is woken by cancel_pending(): the
+  // timer entry is dropped and the coroutine resumes so sleep_awaiter's
+  // await_resume throws dripcore::cancelled.
+
+  dripcore::scheduler scheduler;
+  std::atomic<bool> was_cancelled{false};
+  std::atomic<bool> slept{false};
+
+  class sleeper_task : public dripcore::task
+  {
+  public:
+    sleeper_task(std::atomic<bool>& cancelled, std::atomic<bool>& slept)
+      : cancelled_(cancelled), slept_(slept) {}
+
+    dripcore::task_handle execute()
+    {
+      try {
+        co_await sleep_for(std::chrono::seconds(10)); // long; should be cancelled
+        slept_ = true;                                // must not be reached
+      } catch (const dripcore::cancelled&) {
+        cancelled_ = true;
+      }
+      co_return;
+    }
+
+  private:
+    std::atomic<bool>& cancelled_;
+    std::atomic<bool>& slept_;
+  };
+
+  class canceller_task : public dripcore::task
+  {
+  public:
+    dripcore::task_handle execute()
+    {
+      co_await sleep_for(std::chrono::milliseconds(10));
+      dripcore::executor::current()->cancel_pending();
+      co_return;
+    }
+  };
+
+  scheduler.spawn<sleeper_task>(was_cancelled, slept);
+  scheduler.spawn<canceller_task>();
+  scheduler.run();
+
+  CHECK(was_cancelled == true);
+  CHECK(slept == false);
 }
 
 

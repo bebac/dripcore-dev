@@ -21,12 +21,22 @@ namespace dripcore
     }
   }
 
-  void event_loop_kqueue::register_event(int fd, short events, std::coroutine_handle<> h)
+  void event_loop_kqueue::register_event(int fd, short events, void* udata)
   {
     struct kevent kev;
     int filter = (events & POLLIN) ? EVFILT_READ : EVFILT_WRITE;
-    EV_SET(&kev, fd, filter, EV_ADD | EV_ONESHOT, 0, 0, h.address());
+    EV_SET(&kev, fd, filter, EV_ADD | EV_ONESHOT, 0, 0, udata);
     kevent(kqueue_fd_, &kev, 1, nullptr, 0, nullptr);
+  }
+
+  void event_loop_kqueue::deregister_event(int fd, short events)
+  {
+    struct kevent kev;
+    int filter = (events & POLLIN) ? EVFILT_READ : EVFILT_WRITE;
+    EV_SET(&kev, fd, filter, EV_DELETE, 0, 0, nullptr);
+    // Ignore errors: with EV_ONESHOT the knote may already be gone, or the fd
+    // may never have been armed. ENOENT here is expected and harmless.
+    (void)kevent(kqueue_fd_, &kev, 1, nullptr, 0, nullptr);
   }
 
   int event_loop_kqueue::poll(int timeout_ms, std::function<void(void*)> resume_callback)
