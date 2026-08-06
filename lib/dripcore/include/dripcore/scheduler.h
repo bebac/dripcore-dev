@@ -2,6 +2,7 @@
 #define DRIPCORE_SCHEDULER_H
 
 #include <dripcore/executor.h>
+#include <dripcore/task_control.h>
 #include <memory>
 #include <cstddef>
 
@@ -17,17 +18,17 @@ namespace dripcore
     // For Phase 2, num_executors is always 1 (ignored)
     explicit scheduler(size_t num_executors = 1);
     ~scheduler();
-    
+
     // Spawn a task on the scheduler
     // Currently delegates to the single executor
     template <typename T, typename... Args>
-    void spawn(Args&&... args) {
-      executor_->spawn<T>(std::forward<Args>(args)...);
+    task_control spawn(Args&&... args) {
+      return executor_->spawn<T>(std::forward<Args>(args)...);
     }
-    
+
     // Run the scheduler until all tasks complete
     void run();
-    
+
   private:
     std::unique_ptr<executor> executor_;
   };

@@ -35,6 +35,7 @@ add_library(core STATIC
     lib/dripcore/source/io_awaiter.cpp
     lib/dripcore/source/socket.cpp
     lib/dripcore/source/sleep_awaiter.cpp
+    lib/dripcore/source/task_control.cpp
     ${EVENT_LOOP_SOURCE}
 )
 

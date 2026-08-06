@@ -2,6 +2,9 @@
 #define DRIPCORE_CHANNEL_H
 
 #include <dripcore/executor.h>
+#include <dripcore/task.h>
+#include <dripcore/task_control_block.h>
+#include <dripcore/cancelled.h>
 
 #include <coroutine>
 #include <deque>
@@ -48,9 +51,9 @@ namespace dripcore
 
     // --- Consumer side (coroutine-friendly) ---
 
-    auto recv()
+    auto recv(dripcore::task* task)
     {
-      return recv_awaiter{this};
+      return recv_awaiter{this, task->control_block_->executor_, task->control_block_.get()};
     }
 
     // --- Lifecycle ---
@@ -75,6 +78,9 @@ namespace dripcore
     struct recv_awaiter
     {
       channel* ch_;
+      executor* exec_ptr_;
+      task_control_block* control_block_;
+      std::coroutine_handle<> handle_ = nullptr;
 
       bool await_ready()
       {
@@ -84,11 +90,23 @@ namespace dripcore
 
       void await_suspend(std::coroutine_handle<> h)
       {
+        handle_ = h;
         ch_->waiting_receiver_ = h;
+
+        if (control_block_) {
+          control_block_->handle_ = h;
+          control_block_->register_awaiter(&cancel_recv_awaiter, this);
+        }
       }
 
       std::optional<T> await_resume()
       {
+        if (control_block_) {
+          control_block_->clear_awaiter();
+        }
+        if (control_block_ && control_block_->cancelled_) {
+          throw cancelled{};
+        }
         if (ch_->buffer_.empty()) {
           return std::nullopt;  // Channel closed, no more data
         }
@@ -97,7 +115,30 @@ namespace dripcore
         ch_->buffer_.pop_front();
         return value;
       }
+
+      ~recv_awaiter()
+      {
+        // If we're being destroyed while still suspended, clear the dangling
+        // reference in the channel to prevent use-after-free when try_send/close
+        // tries to resume the coroutine.
+        if (ch_ && ch_->waiting_receiver_ == handle_) {
+          ch_->waiting_receiver_ = nullptr;
+        }
+      }
+
+      static void cancel_recv_awaiter(void* ptr)
+      {
+        auto* recv = static_cast<recv_awaiter*>(ptr);
+        if (recv->ch_ && recv->ch_->waiting_receiver_ == recv->handle_) {
+          recv->ch_->waiting_receiver_ = nullptr;
+          if (recv->exec_ptr_ && recv->control_block_) {
+            recv->exec_ptr_->ready_task(recv->control_block_);
+          }
+        }
+      }
     };
+
+  private:
 
   private:
     size_t capacity_;

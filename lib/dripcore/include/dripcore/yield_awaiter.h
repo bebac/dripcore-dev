@@ -6,13 +6,17 @@
 namespace dripcore
 {
   class executor;
+  struct task_control_block;
 
   struct yield_awaiter
   {
-    executor* exec_ptr;
-    bool await_ready() { return false; }
+    executor* exec_ptr_;
+    task_control_block* control_block_;
+
+    // Return true if task was cancelled, false to suspend
+    bool await_ready();
     void await_suspend(std::coroutine_handle<> h);
-    void await_resume() {}
+    void await_resume();
   };
 }
 

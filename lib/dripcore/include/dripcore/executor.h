@@ -3,6 +3,7 @@
 
 #include <dripcore/task_handle.h>
 #include <dripcore/event_loop.h>
+#include <dripcore/task_control.h>
 //#include <dripcore/event.h>
 #include <vector>
 #include <list>
@@ -31,34 +32,42 @@ namespace dripcore
     static executor* current();
   public:
     template <typename T, typename... Args>
-    void spawn(Args&&... args) {
+    task_control spawn(Args&&... args) {
       // 1. Create the task object (e.g., greeter)
       // We use a shared_ptr to keep the task object alive as long
       // as the coroutine (task_handle) is alive.
       auto obj = std::make_shared<T>(std::forward<Args>(args)...);
 
-      // 2. (REMOVED) No longer needed - tasks use executor::current() instead
-
-      // 3. Start the coroutine.
+      // 2. Start the coroutine.
       // We assume the convention that T has a method 'execute()'
       // which returns a dripcore::coroutine.
       auto t = obj->execute();
 
-      // 4. Register the task
+      // 3. Register the task
       //t.set_scheduler(this);
       t.set_holder(obj);
+
+      // 4. Set up control block. The promise also holds it so final_suspend()
+      // can mark the task finished before the frame is reaped.
+      obj->control_block_->executor_ = this;
+      obj->control_block_->handle_ = t.handle_;
+      t.handle_.promise().control_block_ = obj->control_block_;
 
       // 5. Keep the task in the execution list and add it to the
       // ready list.
       auto& r = tasks_.emplace_back(std::move(t));
-
       ready_task(r.handle_);
+
+      // 6. Return task_control for per-task cancellation
+      return task_control{obj->control_block_};
     }
   public:
     void register_timer(std::chrono::steady_clock::time_point wake_time,
                         std::coroutine_handle<> h,
                         sleep_awaiter* awaiter = nullptr);
+    void deregister_timer(sleep_awaiter* awaiter);
     void ready_task(std::coroutine_handle<> h);
+    void ready_task(task_control_block* cb);
     bool process_ready_tasks();
     void run();
 

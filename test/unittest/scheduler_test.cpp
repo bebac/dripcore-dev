@@ -422,4 +422,181 @@ TEST_CASE("scheduler: sleeping task is cancelled via cancel_pending"
   CHECK(slept == false);
 }
 
+// Fixture for task control cancellation tests
+class TaskControlFixture : public PipeFixture
+{
+protected:
+  dripcore::scheduler scheduler;
+  std::atomic<bool> was_cancelled{false};
+  std::atomic<bool> operation_completed{false};
 
+  // Helper to create a canceller task that cancels another task after a delay
+  template <typename TaskType>
+  class canceller_task : public dripcore::task
+  {
+  public:
+    canceller_task(int fd, std::atomic<bool> &cancelled, std::atomic<bool> &completed)
+        : fd_(fd), cancelled_(cancelled), completed_(completed) {}
+
+    dripcore::task_handle execute()
+    {
+      auto target = spawn<TaskType>(fd_, cancelled_, completed_);
+      co_await sleep_for(std::chrono::milliseconds(10));
+      target.cancel();
+      co_return;
+    }
+
+  private:
+    int fd_;
+    std::atomic<bool> &cancelled_;
+    std::atomic<bool> &completed_;
+  };
+};
+
+// Test cancellation of a task waiting on a timer (sleep)
+TEST_CASE_FIXTURE(TaskControlFixture,
+  "scheduler: task control cancel - timer"
+  * doctest::timeout(2))
+{
+  class sleeper_task : public dripcore::task
+  {
+  public:
+    sleeper_task(int fd, std::atomic<bool>& cancelled, std::atomic<bool>& completed)
+      : cancelled_(cancelled), completed_(completed) {}
+
+    dripcore::task_handle execute()
+    {
+      try {
+        co_await sleep_for(std::chrono::seconds(10)); // long; should be cancelled
+        completed_ = true; // must not be reached
+      } catch (const dripcore::cancelled&) {
+        cancelled_ = true;
+      }
+      co_return;
+    }
+
+  private:
+    std::atomic<bool>& cancelled_;
+    std::atomic<bool>& completed_;
+  };
+
+  scheduler.spawn<canceller_task<sleeper_task>>(-1, was_cancelled, operation_completed);
+  scheduler.run();
+
+  CHECK(was_cancelled == true);
+  CHECK(operation_completed == false);
+}
+
+// Test cancellation of a task waiting on I/O
+TEST_CASE_FIXTURE(TaskControlFixture,
+  "scheduler: task control cancel - io"
+  * doctest::timeout(2))
+{
+  std::atomic<bool> was_cancelled{false};
+  std::atomic<bool> read_completed{false};
+
+  class reader_task : public dripcore::task
+  {
+  public:
+    reader_task(int fd, std::atomic<bool>& cancelled, std::atomic<bool>& completed)
+      : fd_(fd), cancelled_(cancelled), completed_(completed) {}
+
+    dripcore::task_handle execute()
+    {
+      try {
+        co_await readable(fd_); // pipe never becomes readable
+        completed_ = true; // must not be reached
+      } catch (const dripcore::cancelled&) {
+        cancelled_ = true;
+      }
+      co_return;
+    }
+
+  private:
+    int fd_;
+    std::atomic<bool>& cancelled_;
+    std::atomic<bool>& completed_;
+  };
+
+  scheduler.spawn<canceller_task<reader_task>>(pipefd[0], was_cancelled, read_completed);
+  scheduler.run();
+
+  CHECK(was_cancelled == true);
+  CHECK(read_completed == false);
+}
+
+// Test cancellation of a task yielding
+TEST_CASE_FIXTURE(TaskControlFixture,
+  "scheduler: task control cancel - yield"
+  * doctest::timeout(2))
+{
+  class yielder_task : public dripcore::task
+  {
+  public:
+    yielder_task(int fd, std::atomic<bool>& cancelled, std::atomic<bool>& completed)
+      : cancelled_(cancelled), completed_(completed) {}
+
+    dripcore::task_handle execute()
+    {
+      try {
+        for (unsigned i = 0; i < 10000000; i++)
+        {
+          co_await yield();
+        }
+        completed_ = true; // must not be reached
+      } catch (const dripcore::cancelled&) {
+        cancelled_ = true;
+      }
+      co_return;
+    }
+
+  private:
+    std::atomic<bool>& cancelled_;
+    std::atomic<bool>& completed_;
+  };
+
+  scheduler.spawn<canceller_task<yielder_task>>(-1, was_cancelled, operation_completed);
+  scheduler.run();
+
+  CHECK(was_cancelled == true);
+  CHECK(operation_completed == false);
+}
+
+TEST_CASE("task_control: done() and cancel() are safe after the task completes"
+  * doctest::timeout(2))
+{
+  // A task_control may outlive the task it refers to. Once the task completes,
+  // the executor reaps it and destroys the coroutine frame, so the control
+  // block must not dereference the (now dangling) coroutine handle.
+  // Regression test: this is a use-after-free if done()/cancel() inspect
+  // handle_ instead of a completion flag stored in the control block.
+
+  dripcore::scheduler scheduler;
+  std::atomic<bool> task_ran{false};
+
+  class simple_task : public dripcore::task
+  {
+  public:
+    simple_task(std::atomic<bool>& ran) : ran_(ran) {}
+
+    dripcore::task_handle execute()
+    {
+      ran_ = true;
+      co_await yield();
+      co_return;
+    }
+
+  private:
+    std::atomic<bool>& ran_;
+  };
+
+  dripcore::task_control tc = scheduler.spawn<simple_task>(task_ran);
+  CHECK(tc.done() == false);
+
+  scheduler.run();   // task completes and its frame is destroyed
+
+  CHECK(task_ran == true);
+  CHECK(tc.done() == true);   // must not touch the destroyed frame
+  tc.cancel();                // must be a safe no-op
+  CHECK(tc.done() == true);
+}

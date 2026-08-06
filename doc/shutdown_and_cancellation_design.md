@@ -219,7 +219,7 @@ public:
     void cancel();          // request cooperative cancellation
     bool done() const;      // completed or cancelled
 private:
-    std::shared_ptr<control_block> cb_;  // { executor*, coroutine_handle, state }
+    std::shared_ptr<task_control_block> cb_;  // { executor*, coroutine_handle, state }
 };
 ```
 

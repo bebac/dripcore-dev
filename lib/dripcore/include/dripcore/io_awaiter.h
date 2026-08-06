@@ -6,28 +6,31 @@
 namespace dripcore
 {
   class executor;
+  struct task_control_block;
 
   struct io_awaiter
   {
     int fd_;
     short events_;         // POLLIN | POLLOUT
     executor* exec_ptr_;
+    task_control_block* control_block_;
 
     // Cancellation / registry state, set while the awaiter is suspended.
     // These have default member initializers so aggregate initialization
-    // (io_awaiter{fd, events, exec}) continues to work.
-    std::coroutine_handle<> handle_ = nullptr; // captured awaiting coroutine
-    bool cancelled_ = false;                   // set by executor on cancel
+    // (io_awaiter{fd, events, exec, control_block}) continues to work.
     bool linked_ = false;                      // in executor's pending-io list?
     io_awaiter* prev_ = nullptr;               // intrusive list links,
     io_awaiter* next_ = nullptr;               // owned by the executor
 
-    // Return false to indicate we want to suspend
-    bool await_ready() const noexcept { return false; }
+    void cancel();
+
+    // Return true if task was cancelled, false to suspend
+    bool await_ready() const noexcept;
 
     // Called just before the coroutine is suspended. Captures the handle and
     // registers with the executor (arms the platform event loop + links into
-    // the registry). Out-of-line: needs the full executor definition.
+    // the registry) and with the control block. Out-of-line: needs the
+    // full executor definition.
     void await_suspend(std::coroutine_handle<> h);
 
     // Called when the coroutine is resumed. Throws dripcore::cancelled if the

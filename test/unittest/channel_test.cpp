@@ -2,6 +2,7 @@
 #include "dripcore/scheduler.h"
 #include "dripcore/task.h"
 #include "dripcore/channel.h"
+#include "dripcore/cancelled.h"
 
 #include <vector>
 #include <string>
@@ -48,7 +49,7 @@ TEST_CASE("channel: producer task sends, consumer task receives" * doctest::time
     {
       while (true)
       {
-        auto val = co_await ch_->recv();
+        auto val = co_await ch_->recv(this);
         if (!val) {
           break;
         }
@@ -100,7 +101,7 @@ TEST_CASE("channel: recv returns nullopt after close with empty buffer" * doctes
 
     dripcore::task_handle execute()
     {
-      auto val = co_await ch_->recv();
+      auto val = co_await ch_->recv(this);
       got_nullopt_ = !val.has_value();
       co_return;
     }
@@ -153,7 +154,7 @@ TEST_CASE("channel: drain remaining items after close" * doctest::timeout(1))
     {
       for ( auto v : expected_ )
       {
-        auto val = co_await ch_->recv();
+        auto val = co_await ch_->recv(this);
         if (!val) {
           REQUIRE(false);
         }
@@ -161,7 +162,7 @@ TEST_CASE("channel: drain remaining items after close" * doctest::timeout(1))
       }
       CHECK(received_ == expected_);
       // Channel should be closed next.
-      auto val = co_await ch_->recv();
+      auto val = co_await ch_->recv(this);
       CHECK(!val);
       co_return;
     }
@@ -266,7 +267,7 @@ TEST_CASE("channel: consumer suspends until producer sends")
 
     dripcore::task_handle execute()
     {
-      auto val = co_await ch_->recv(); // Should suspend here
+      auto val = co_await ch_->recv(this); // Should suspend here
       if (val)
       {
         value_ = *val;
@@ -342,7 +343,7 @@ TEST_CASE("channel: works with move-only types")
     dripcore::task_handle execute()
     {
       co_await yield();
-      auto val = co_await ch_->recv();
+      auto val = co_await ch_->recv(this);
       if (val && *val)
       {
         out_ = **val;
@@ -406,7 +407,7 @@ TEST_CASE("channel: concurrent send from multiple producers, single consumer")
         dripcore::task_handle execute() {
             int count = 0;
             while (count < expected_) {
-                auto val = co_await ch_->recv();
+                auto val = co_await ch_->recv(this);
                 if (!val) break;
                 received_.fetch_add(1);
                 count++;
@@ -434,4 +435,68 @@ TEST_CASE("channel: concurrent send from multiple producers, single consumer")
 
     CHECK(produced_count == expected_total);
     CHECK(received_count == expected_total);
+}
+
+TEST_CASE("channel: recv task is cancelled via task_control"
+  * doctest::timeout(2)
+)
+{
+  dripcore::scheduler scheduler;
+  auto ch = std::make_shared<dripcore::channel<int>>(4);
+
+  std::atomic<bool> was_cancelled{false};
+  std::atomic<bool> recv_completed{false};
+
+  class receiver_task : public dripcore::task
+  {
+  public:
+    receiver_task(std::shared_ptr<dripcore::channel<int>> ch,
+                  std::atomic<bool>& cancelled,
+                  std::atomic<bool>& completed)
+      : ch_(ch), cancelled_(cancelled), completed_(completed) {}
+
+    dripcore::task_handle execute()
+    {
+      try {
+        auto val = co_await ch_->recv(this); // Will suspend forever (no producer)
+        completed_ = true;                   // Must NOT be reached
+      } catch (const dripcore::cancelled&) {
+        cancelled_ = true;
+      }
+      co_return;
+    }
+
+  private:
+    std::shared_ptr<dripcore::channel<int>> ch_;
+    std::atomic<bool>& cancelled_;
+    std::atomic<bool>& completed_;
+  };
+
+  class canceller_task : public dripcore::task
+  {
+  public:
+    canceller_task(std::shared_ptr<dripcore::channel<int>> ch,
+                   std::atomic<bool>& cancelled,
+                   std::atomic<bool>& completed)
+      : ch_(ch), cancelled_(cancelled), completed_(completed) {}
+
+    dripcore::task_handle execute()
+    {
+      auto receiver = spawn<receiver_task>(ch_, cancelled_, completed_);
+      co_await sleep_for(std::chrono::milliseconds(10)); // Let receiver suspend
+      receiver.cancel();
+      co_return;
+    }
+
+  private:
+    std::shared_ptr<dripcore::channel<int>> ch_;
+    std::atomic<bool>& cancelled_;
+    std::atomic<bool>& completed_;
+  };
+
+  scheduler.spawn<canceller_task>(ch, was_cancelled, recv_completed);
+  scheduler.run();
+
+  CHECK(was_cancelled == true);
+  CHECK(recv_completed == false);
 }

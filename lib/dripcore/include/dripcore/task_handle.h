@@ -3,6 +3,7 @@
 
 #include <dripcore/yield_awaiter.h>
 #include <dripcore/io_awaiter.h>
+#include <dripcore/task_control_block.h>
 
 #include <coroutine>
 #include <memory>
@@ -29,12 +30,22 @@ namespace dripcore
     {
       std::shared_ptr<void> holder_ptr;
       std::exception_ptr exception_;
+      // Set by executor::spawn(). Kept here so final_suspend() can publish
+      // completion without casting holder_ptr back to a task*.
+      std::shared_ptr<task_control_block> control_block_;
 
       task_handle get_return_object() {
         return task_handle{std::coroutine_handle<promise_type>::from_promise(*this)};
       }
       std::suspend_always initial_suspend() noexcept { return {}; }
-      std::suspend_always final_suspend() noexcept { return {}; }
+      std::suspend_always final_suspend() noexcept {
+        // Publish completion before the frame can be reaped, so a retained
+        // task_control never dereferences the dangling handle.
+        if (control_block_) {
+          control_block_->finished_.store(true, std::memory_order_release);
+        }
+        return {};
+      }
       void return_void() {}
       void unhandled_exception() {
         // Capture exception instead of terminating.

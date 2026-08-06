@@ -88,7 +88,9 @@ namespace dripcore
     // resume if still linked, so a concurrent cancel in the same poll batch
     // cannot cause a double resume.
     if (unlink_io(a)) {
-      resume(a->handle_);
+      if (a->control_block_) {
+        resume(a->control_block_->handle_);
+      }
     }
   }
 
@@ -96,22 +98,24 @@ namespace dripcore
   {
     std::size_t count = 0;
 
-    // Cancel all pending I/O waits: mark cancelled, remove the kernel
+    // Cancel all pending I/O waits: mark cancelled in control block, remove the kernel
     // registration, then schedule the coroutine to resume (it will throw
     // dripcore::cancelled from io_awaiter::await_resume).
     while (io_head_) {
       io_awaiter* a = io_head_;
-      a->cancelled_ = true;
+      a->cancel();
       unlink_io(a);                                     // advances io_head_
       event_loop_->deregister_event(a->fd_, a->events_);
-      ready_task(a->handle_);
+      if (a->control_block_) {
+        ready_task(a->control_block_);
+      }
       ++count;
     }
 
     // Cancel all pending timers (sleepers).
     for (auto it = timer_queue_.begin(); it != timer_queue_.end(); ++it) {
       if (it->awaiter) {
-        it->awaiter->cancelled_ = true;
+        it->awaiter->cancel();
       }
       if (it->handle && !it->handle.done()) {
         ready_task(it->handle);
@@ -131,6 +135,23 @@ namespace dripcore
     // Wake up the event loop if it was waiting
     if (was_empty) {
       event_loop_->trigger_wake_notification();
+    }
+  }
+
+  void executor::ready_task(task_control_block* cb)
+  {
+    if (cb) {
+      ready_task(cb->handle_);
+    }
+  }
+
+  void executor::deregister_timer(sleep_awaiter* awaiter)
+  {
+    for (auto it = timer_queue_.begin(); it != timer_queue_.end(); ++it) {
+      if (it->awaiter == awaiter) {
+        timer_queue_.erase(it);
+        break;
+      }
     }
   }
 

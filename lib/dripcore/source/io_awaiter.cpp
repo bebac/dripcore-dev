@@ -1,12 +1,46 @@
 #include "dripcore/io_awaiter.h"
 #include "dripcore/executor.h"
 #include "dripcore/cancelled.h"
+#include "dripcore/task_control_block.h"
+#include "dripcore/task_handle.h"
 
 namespace dripcore
 {
+  namespace
+  {
+    void cancel_io_awaiter(void* ptr)
+    {
+      auto* io = static_cast<io_awaiter*>(ptr);
+      if (io->exec_ptr_ && io->control_block_)
+      {
+        io->exec_ptr_->deregister_io(io);
+        io->exec_ptr_->ready_task(io->control_block_);
+      }
+    }
+  }
+
+  void io_awaiter::cancel()
+  {
+    if (control_block_) {
+      control_block_->cancelled_.store(true);
+    }
+  }
+
+  bool io_awaiter::await_ready() const noexcept
+  {
+    if (control_block_) {
+      return control_block_->cancelled_.load(std::memory_order_acquire);
+    }
+    return false;
+  }
+
   void io_awaiter::await_suspend(std::coroutine_handle<> h)
   {
-    handle_ = h;
+    if (control_block_) {
+      control_block_->handle_ = h;
+      control_block_->register_awaiter(&cancel_io_awaiter, this);
+    }
+
     if (exec_ptr_) {
       exec_ptr_->register_io(this);
     }
@@ -14,7 +48,10 @@ namespace dripcore
 
   short io_awaiter::await_resume()
   {
-    if (cancelled_) {
+    if (control_block_) {
+      control_block_->clear_awaiter();
+    }
+    if (control_block_ && control_block_->cancelled_) {
       throw cancelled{};
     }
     return events_;
@@ -22,9 +59,9 @@ namespace dripcore
 
   io_awaiter::~io_awaiter()
   {
-    // If the frame is destroyed while still armed (e.g. forced shutdown),
-    // remove the kernel registration so a later event cannot resume freed
-    // memory. No-op if already unlinked by the normal resume/cancel path.
+    if (control_block_) {
+      control_block_->clear_awaiter();
+    }
     if (exec_ptr_) {
       exec_ptr_->deregister_io(this);
     }
