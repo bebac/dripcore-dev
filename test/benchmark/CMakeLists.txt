@@ -14,4 +14,4 @@ target_include_directories(benchmark PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../common
 )
 
-target_link_libraries(benchmark PRIVATE core)
+target_link_libraries(benchmark PRIVATE dripcore)

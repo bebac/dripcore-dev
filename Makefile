@@ -11,7 +11,7 @@ all: build
 $(SENTINEL_FILE): $(CMAKE_SOURCE_DIR)/CMakeLists.txt
 	@echo "Generating CMake configuration..."
 	@mkdir -p $(CMAKE_BINARY_DIR)
-	@cmake -S $(CMAKE_SOURCE_DIR) -B $(CMAKE_BINARY_DIR)
+	@cmake -S $(CMAKE_SOURCE_DIR) -B $(CMAKE_BINARY_DIR) -DBUILD_TESTING=ON -DBUILD_BENCHMARKS=ON
 	@touch $(SENTINEL_FILE)
 
 # Build the project

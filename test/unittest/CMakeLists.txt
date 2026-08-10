@@ -14,4 +14,4 @@ target_include_directories(unittest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../common
 )
 
-target_link_libraries(unittest PRIVATE core)
+target_link_libraries(unittest PRIVATE dripcore)
