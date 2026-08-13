@@ -21,7 +21,7 @@ TEST_CASE("scheduler: basic task execution")
   {
   public:
     test_task(std::atomic<bool> &task_ran) : task_ran_(task_ran) {}
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       task_ran_ = true;
       co_await yield();
@@ -74,7 +74,7 @@ TEST_CASE_FIXTURE(PipeFixture, "scheduler: pipe communication")
   public:
     writer_task(int fd, std::atomic<bool>& done) : write_fd_(fd), done_(done) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       const char *msg = "Hello from writer!";
 
@@ -100,7 +100,7 @@ TEST_CASE_FIXTURE(PipeFixture, "scheduler: pipe communication")
     reader_task(int fd, std::atomic<bool>& done)
         : read_fd_(fd), done_(done) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       char buffer[256];
 
@@ -152,7 +152,7 @@ TEST_CASE_FIXTURE(PipeFixture, "scheduler: I/O tasks are not starved by CPU-boun
   public:
     cpu_task(std::atomic<int>& counter, int max) : counter_(counter), max_(max) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       while (counter_ < max_)
       {
@@ -174,7 +174,7 @@ TEST_CASE_FIXTURE(PipeFixture, "scheduler: I/O tasks are not starved by CPU-boun
     io_task(int read_fd, int write_fd, std::atomic<bool>& done)
         : read_fd_(read_fd), write_fd_(write_fd), done_(done) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       // First write to the pipe so there's data to read
       const char *msg = "test";
@@ -223,7 +223,7 @@ TEST_CASE("scheduler: task exceptions are captured, not terminated")
     throwing_task(std::atomic<bool>& started, std::atomic<bool>& completed)
       : started_(started), completed_(completed) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       started_ = true;
       co_await yield();
@@ -257,7 +257,7 @@ TEST_CASE("scheduler: dripcore::cancelled exception is captured")
   public:
     cancelled_task(std::atomic<bool>& ran) : ran_(ran) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       ran_ = true;
       co_await yield();
@@ -290,11 +290,11 @@ TEST_CASE("scheduler: exception thrown before first co_await is captured")
   public:
     early_throw_task(std::atomic<bool>& ran) : ran_(ran) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       ran_ = true;
       throw std::runtime_error("thrown before first co_await");
-      co_return; // unreachable; present only to make execute() a coroutine
+      co_return; // unreachable; present only to make body() a coroutine
     }
 
   private:
@@ -327,7 +327,7 @@ TEST_CASE_FIXTURE(PipeFixture,
     reader_task(int fd, std::atomic<bool>& cancelled, std::atomic<bool>& completed)
       : fd_(fd), cancelled_(cancelled), completed_(completed) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       try {
         co_await readable(fd_);   // pipe never becomes readable
@@ -349,7 +349,7 @@ TEST_CASE_FIXTURE(PipeFixture,
   public:
     canceller_task(std::atomic<std::size_t>& count) : count_(count) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       // Let the reader park on its io wait first, then cancel.
       co_await sleep_for(std::chrono::milliseconds(10));
@@ -387,7 +387,7 @@ TEST_CASE("scheduler: sleeping task is cancelled via cancel_pending"
     sleeper_task(std::atomic<bool>& cancelled, std::atomic<bool>& slept)
       : cancelled_(cancelled), slept_(slept) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       try {
         co_await sleep_for(std::chrono::seconds(10)); // long; should be cancelled
@@ -406,7 +406,7 @@ TEST_CASE("scheduler: sleeping task is cancelled via cancel_pending"
   class canceller_task : public dripcore::task
   {
   public:
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       co_await sleep_for(std::chrono::milliseconds(10));
       dripcore::executor::current()->cancel_pending();
@@ -438,7 +438,7 @@ protected:
     canceller_task(int fd, std::atomic<bool> &cancelled, std::atomic<bool> &completed)
         : fd_(fd), cancelled_(cancelled), completed_(completed) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       auto target = spawn<TaskType>(fd_, cancelled_, completed_);
       co_await sleep_for(std::chrono::milliseconds(10));
@@ -464,7 +464,7 @@ TEST_CASE_FIXTURE(TaskControlFixture,
     sleeper_task(int fd, std::atomic<bool>& cancelled, std::atomic<bool>& completed)
       : cancelled_(cancelled), completed_(completed) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       try {
         co_await sleep_for(std::chrono::seconds(10)); // long; should be cancelled
@@ -501,7 +501,7 @@ TEST_CASE_FIXTURE(TaskControlFixture,
     reader_task(int fd, std::atomic<bool>& cancelled, std::atomic<bool>& completed)
       : fd_(fd), cancelled_(cancelled), completed_(completed) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       try {
         co_await readable(fd_); // pipe never becomes readable
@@ -536,7 +536,7 @@ TEST_CASE_FIXTURE(TaskControlFixture,
     yielder_task(int fd, std::atomic<bool>& cancelled, std::atomic<bool>& completed)
       : cancelled_(cancelled), completed_(completed) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       try {
         for (unsigned i = 0; i < 10000000; i++)
@@ -579,7 +579,7 @@ TEST_CASE("task_control: done() and cancel() are safe after the task completes"
   public:
     simple_task(std::atomic<bool>& ran) : ran_(ran) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       ran_ = true;
       co_await yield();
@@ -611,7 +611,7 @@ TEST_CASE("scheduler: graceful shutdown cancels all tasks"
   {
   public:
     long_sleeper(std::atomic<bool>& cancelled) : cancelled_(cancelled) {}
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       try {
         co_await sleep_for(std::chrono::seconds(30));
@@ -628,7 +628,7 @@ TEST_CASE("scheduler: graceful shutdown cancels all tasks"
   {
   public:
     shutdown_initiator(dripcore::scheduler& sched) : sched_(sched) {}
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       co_await sleep_for(std::chrono::milliseconds(10));
       sched_.shutdown(std::chrono::seconds(5));
@@ -662,7 +662,7 @@ TEST_CASE("scheduler: forced shutdown destroys tasks after deadline"
   {
   public:
     stubborn_task(std::atomic<bool>& cancelled) : cancelled_(cancelled) {}
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       bool need_stubborn = false;
       try {
@@ -687,7 +687,7 @@ TEST_CASE("scheduler: forced shutdown destroys tasks after deadline"
   {
   public:
     shutdown_initiator(dripcore::scheduler& sched) : sched_(sched) {}
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       co_await sleep_for(std::chrono::milliseconds(10));
       sched_.shutdown(std::chrono::milliseconds(50));
@@ -714,7 +714,7 @@ TEST_CASE("scheduler: shutdown before run cancels tasks at first suspension"
   {
   public:
     sleeper_task(std::atomic<bool>& cancelled) : cancelled_(cancelled) {}
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       try {
         co_await sleep_for(std::chrono::seconds(30));

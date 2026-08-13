@@ -21,7 +21,7 @@ TEST_CASE("awaitable: basic void composition")
   public:
     test_task(std::atomic<bool>& completed) : completed_(completed) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       auto helper_coroutine = []() -> dripcore::awaitable<> {
         co_return;
@@ -52,7 +52,7 @@ TEST_CASE("awaitable: basic value returning")
   public:
     test_task(std::atomic<int>& result) : result_(result) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       auto return_value_coroutine = []() -> dripcore::awaitable<int> {
         co_return 42;
@@ -87,7 +87,7 @@ TEST_CASE("awaitable: nested awaiting")
   public:
     test_task(std::atomic<int>& result) : result_(result) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       struct nested_helper {
         dripcore::awaitable<int> innermost() {
@@ -132,7 +132,7 @@ TEST_CASE("awaitable: exception propagation")
   public:
     test_task(std::atomic<bool>& caught) : caught_(caught) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       auto throwing_coroutine = []() -> dripcore::awaitable<> {
         throw std::runtime_error("test error");
@@ -175,7 +175,7 @@ TEST_CASE("awaitable: std::string return type")
   public:
     test_task(std::string& result, std::mutex& mtx) : result_(result), result_mutex_(mtx) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       auto return_string = []() -> dripcore::awaitable<std::string> {
         co_return std::string("hello world");
@@ -211,7 +211,7 @@ TEST_CASE("awaitable: move-only type")
   public:
     test_task(std::atomic<int>& result) : result_(result) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       auto return_unique_ptr = []() -> dripcore::awaitable<std::unique_ptr<int>> {
         co_return std::make_unique<int>(99);
@@ -246,7 +246,7 @@ TEST_CASE("awaitable: backward compatibility with existing tasks")
   public:
     old_task(std::atomic<bool>& completed) : completed_(completed) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       completed_ = true;
       co_await yield();
@@ -274,7 +274,7 @@ TEST_CASE("awaitable: mixing old and new style")
   public:
     old_style_task(std::atomic<bool>& completed) : completed_(completed) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       co_await yield();
       completed_ = true;
@@ -290,7 +290,7 @@ TEST_CASE("awaitable: mixing old and new style")
   public:
     new_style_task(std::atomic<bool>& completed) : completed_(completed) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       co_await []() -> dripcore::awaitable<> {
         co_return;
@@ -325,7 +325,7 @@ TEST_CASE("awaitable: integration with yield")
   public:
     test_task(std::atomic<int>& counter) : counter_(counter) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       auto async_operation = [this]() -> dripcore::awaitable<> {
         co_await yield();
@@ -365,7 +365,7 @@ TEST_CASE("awaitable: many tasks with awaitables" * doctest::timeout(5))
   public:
     test_task(std::atomic<int>& count) : count_(count) {}
 
-    dripcore::task_handle execute()
+    dripcore::awaitable<> body() override
     {
       co_await []() -> dripcore::awaitable<> {
         co_return;

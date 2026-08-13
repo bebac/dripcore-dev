@@ -102,8 +102,7 @@ class greeter : public dripcore::task
 public:
   greeter(std::string name) : name_(name) {}
 
-  // The coroutine is a member function
-  dripcore::task_handle execute() {
+  dripcore::awaitable<> body() override {
     std::cout << "hello " << name_ << std::endl;
     co_await yield();
     std::cout << "goodbye " << name_ << std::endl;
@@ -118,7 +117,7 @@ class echo_connection : public dripcore::task {
 public:
   echo_connection(dripcore::socket socket) : socket_(std::move(socket)) {}
 
-  dripcore::task_handle execute() {
+  dripcore::awaitable<> body() override {
     char buf[4096];
 
     while (true) {
@@ -133,6 +132,7 @@ public:
     }
 
     // Socket closes automatically
+    co_return;
   }
 
 private:
@@ -143,7 +143,7 @@ class echo_server : public dripcore::task {
 public:
   echo_server(int port) : port_(port) {}
 
-  dripcore::task_handle execute() {
+  dripcore::awaitable<> body() override {
     dripcore::socket server = dripcore::ipv4::tcp::socket();
     dripcore::socket_address addr("0.0.0.0", 4321);
     server.bind(addr);
@@ -165,6 +165,7 @@ public:
 
       std::cout << "client connected " << client_address << std::endl;
     }
+    co_return;
   }
 private:
   int port_;

@@ -19,7 +19,7 @@ TEST_CASE("benchmark: task spawn latency - yield vs no-yield comparison")
         {
         public:
             no_yield_task(std::atomic<bool>& done) : done_(done) {}
-            dripcore::task_handle execute() {
+            dripcore::awaitable<> body() override {
                 done_ = true;
                 co_return;
             }
@@ -48,7 +48,7 @@ TEST_CASE("benchmark: task spawn latency - yield vs no-yield comparison")
         {
         public:
             yield_task(std::atomic<bool>& done) : done_(done) {}
-            dripcore::task_handle execute() {
+            dripcore::awaitable<> body() override {
                 co_await yield();
                 done_ = true;
                 co_return;

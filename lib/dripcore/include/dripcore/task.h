@@ -2,10 +2,12 @@
 #define DRIPCORE_TASK_H
 
 #include <dripcore/executor.h>
+#include <dripcore/awaitable.h>
 #include <dripcore/sleep_awaiter.h>
 #include <dripcore/task_control_block.h>
 #include <concepts>
 #include <memory>
+#include <exception>
 
 namespace dripcore
 {
@@ -22,12 +24,36 @@ namespace dripcore
 
     std::shared_ptr<task_control_block> control_block_;
 
+    // Fixed entry point the executor spawns. Delegates to body() and
+    // teardown() so that async cleanup always runs, even on cancellation
+    // or exception. See doc/shutdown_and_cancellation_design.md §9.
+    task_handle execute()
+    {
+      std::exception_ptr ep;
+      try {
+        co_await body();
+      } catch (...) {
+        ep = std::current_exception();
+      }
+      co_await teardown();
+      if (ep) std::rethrow_exception(ep);
+    }
+
     template <typename T, typename... Args>
     task_control spawn(Args &&...args)
     {
       return executor::current()->spawn<T>(std::forward<Args>(args)...);
     }
   protected:
+    // Task's main logic. Override in derived classes.
+    virtual awaitable<> body() = 0;
+
+    // Always-run async cleanup (the "finally" equivalent). Runs on every
+    // exit path: normal completion, error, and cancellation. Default is
+    // a no-op. May co_await. Not guaranteed to complete under forced
+    // shutdown (frame destruction).
+    virtual awaitable<> teardown() { co_return; }
+
     auto yield()
     {
       return yield_awaiter{executor::current(), control_block_.get()};
