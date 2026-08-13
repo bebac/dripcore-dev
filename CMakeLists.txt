@@ -44,6 +44,7 @@ set_target_properties(dripcore PROPERTIES
 
 option(BUILD_TESTING "Build the testing suite" OFF)
 option(BUILD_BENCHMARKS "Build the benchmark suite" OFF)
+option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
 
 if(BUILD_TESTING)
     enable_testing()
@@ -52,6 +53,11 @@ endif()
 
 if(BUILD_BENCHMARKS)
     add_subdirectory(test/benchmark)
+endif()
+
+if(ENABLE_ASAN)
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address)
 endif()
 
 # Main application

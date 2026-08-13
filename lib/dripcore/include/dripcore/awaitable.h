@@ -33,6 +33,16 @@ namespace dripcore
     // Promise type for coroutine support
     using promise_type = awaitable_promise<T>;
 
+    // Ownership: the awaitable owns its child coroutine frame. The destructor
+    // destroys it, fixing the leak where final_suspend (suspend_always) keeps
+    // the frame alive forever. See doc/shutdown_and_cancellation_design.md §7.
+    ~awaitable();
+
+    // Move-only: the handle is transferred, source is nullified.
+    awaitable(awaitable&& other) noexcept;
+    awaitable(const awaitable&) = delete;
+    awaitable& operator=(const awaitable&) = delete;
+
   private:
     explicit awaitable(std::coroutine_handle<promise_type> handle);
     std::coroutine_handle<promise_type> handle_;
@@ -170,6 +180,28 @@ namespace dripcore
       // Auto-spawn: Schedule the coroutine on the current executor
       executor::current()->ready_task(handle_);
     }
+  }
+
+  // Destructor: destroy the child frame. In normal operation the awaitable is
+  // always co_awaited, so the child has reached final_suspend by the time this
+  // runs. During forced shutdown the frame may be suspended at an earlier
+  // point; destroy() runs in-scope destructors (leaf awaiter deregistration,
+  // RAII cleanup) without resuming. See §7.
+  template<typename T>
+  awaitable<T>::~awaitable()
+  {
+    if (handle_)
+    {
+      handle_.destroy();
+    }
+  }
+
+  // Move constructor: transfer ownership of the frame.
+  template<typename T>
+  awaitable<T>::awaitable(awaitable&& other) noexcept
+      : handle_(other.handle_)
+  {
+    other.handle_ = nullptr;
   }
 
 } // namespace dripcore

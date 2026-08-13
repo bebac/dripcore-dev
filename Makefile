@@ -29,6 +29,14 @@ rebld: clean build
 unittest: build
 	$(CMAKE_BINARY_DIR)/test/unittest/unittest
 
+# Build and test with AddressSanitizer
+asan:
+	@echo "Building with AddressSanitizer..."
+	@mkdir -p build_asan
+	@cmake -S $(CMAKE_SOURCE_DIR) -B build_asan -DBUILD_TESTING=ON -DBUILD_BENCHMARKS=ON -DENABLE_ASAN=ON
+	@cmake --build build_asan -j8
+	@build_asan/test/unittest/unittest
+
 # Add the sentinel file to the list of PHONY targets if you might want to call it directly
-.PHONY: build clean rebld all unittest
+.PHONY: build clean rebld all unittest asan
 
