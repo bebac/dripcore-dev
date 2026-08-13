@@ -127,6 +127,28 @@ namespace dripcore
     return count;
   }
 
+  void executor::shutdown(std::chrono::milliseconds timeout)
+  {
+    shutdown_requested_.store(true, std::memory_order_release);
+    shutdown_deadline_ = std::chrono::steady_clock::now() + timeout;
+
+    // Cancel all suspended tasks (deregister + mark + schedule).
+    cancel_pending();
+
+    // Mark every task's control block as cancelled, including running tasks
+    // that are not currently suspended. This ensures a running task throws
+    // dripcore::cancelled at its next suspension point (await_ready()
+    // checks the flag and returns true, await_resume() throws).
+    for (auto& t : tasks_) {
+      if (t.handle_) {
+        auto& promise = t.handle_.promise();
+        if (promise.control_block_) {
+          promise.control_block_->cancelled_.store(true, std::memory_order_release);
+        }
+      }
+    }
+  }
+
   void executor::ready_task(std::coroutine_handle<> h)
   {
     bool was_empty = ready_queue_.empty();
@@ -180,25 +202,35 @@ namespace dripcore
 
   int executor::calculate_poll_timeout() const
   {
-    if (timer_queue_.empty()) {
-      return 1000; // Default 1 second timeout
-    }
-
     auto now = std::chrono::steady_clock::now();
-    auto next_wake = timer_queue_.begin()->wake_time;
 
-    if (next_wake <= now) {
-      return 0; // Timer already expired, don't block
+    // Compute timer-based timeout
+    int timeout_ms = 1000; // Default 1 second timeout
+    if (!timer_queue_.empty()) {
+      auto next_wake = timer_queue_.begin()->wake_time;
+      if (next_wake <= now) {
+        timeout_ms = 0;
+      } else {
+        // Round up so a sub-millisecond remainder still blocks instead of
+        // busy-spinning with a zero timeout.
+        auto diff = std::chrono::ceil<std::chrono::milliseconds>(next_wake - now);
+        timeout_ms = static_cast<int>(diff.count());
+        if (timeout_ms < 0) timeout_ms = 0;
+        if (timeout_ms > 1000) timeout_ms = 1000;
+      }
     }
 
-    // Round up so a sub-millisecond remainder still blocks instead of
-    // busy-spinning with a zero timeout.
-    auto diff = std::chrono::ceil<std::chrono::milliseconds>(next_wake - now);
+    // If shutting down, bound the poll timeout by the remaining time
+    // until the shutdown deadline so the forced phase fires promptly.
+    if (shutdown_requested_.load(std::memory_order_acquire)) {
+      if (now >= shutdown_deadline_) return 0;
+      auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
+        shutdown_deadline_ - now);
+      int remaining_ms = static_cast<int>(remaining.count());
+      if (remaining_ms <= 0) return 0;
+      return std::min(remaining_ms, timeout_ms);
+    }
 
-    // Clamp to reasonable range (0 to 1000ms)
-    auto timeout_ms = static_cast<int>(diff.count());
-    if (timeout_ms < 0) return 0;
-    if (timeout_ms > 1000) return 1000;
     return timeout_ms;
   }
 
@@ -222,6 +254,28 @@ namespace dripcore
   {
     while (!tasks_.empty())
     {
+      // Forced shutdown: deadline expired, destroy remaining frames.
+      // This runs synchronous RAII destructors inside each coroutine frame
+      // but does NOT resume the coroutines, so catch-based async cleanup
+      // is skipped (see doc/shutdown_and_cancellation_design.md §5).
+      if (shutdown_requested_.load(std::memory_order_acquire) &&
+          std::chrono::steady_clock::now() >= shutdown_deadline_)
+      {
+        for (auto& t : tasks_)
+        {
+          if (t.handle_)
+          {
+            auto& promise = t.handle_.promise();
+            if (promise.control_block_)
+            {
+              promise.control_block_->finished_.store(true, std::memory_order_release);
+            }
+          }
+        }
+        tasks_.clear();
+        break;
+      }
+
       bool had_ready_tasks = process_ready_tasks();
 
       process_expired_timers();  // Catch timers expired between iterations.
@@ -235,6 +289,11 @@ namespace dripcore
       process_expired_timers();
 
       tasks_.remove_if([](const auto &t) { return t.done(); });
+    }
+
+    // If shutdown was requested, reset the state so the executor can be reused.
+    if (shutdown_requested_.load(std::memory_order_acquire)) {
+      shutdown_requested_.store(false, std::memory_order_release);
     }
   }
 

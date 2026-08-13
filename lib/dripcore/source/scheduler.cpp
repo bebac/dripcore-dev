@@ -18,4 +18,9 @@ namespace dripcore
   {
     executor_->run();
   }
+
+  void scheduler::shutdown(std::chrono::milliseconds timeout)
+  {
+    executor_->shutdown(timeout);
+  }
 }

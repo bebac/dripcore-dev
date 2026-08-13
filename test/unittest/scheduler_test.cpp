@@ -600,3 +600,136 @@ TEST_CASE("task_control: done() and cancel() are safe after the task completes"
   tc.cancel();                // must be a safe no-op
   CHECK(tc.done() == true);
 }
+
+TEST_CASE("scheduler: graceful shutdown cancels all tasks"
+  * doctest::timeout(2))
+{
+  dripcore::scheduler scheduler;
+  std::atomic<bool> sleeper_cancelled{false};
+
+  class long_sleeper : public dripcore::task
+  {
+  public:
+    long_sleeper(std::atomic<bool>& cancelled) : cancelled_(cancelled) {}
+    dripcore::task_handle execute()
+    {
+      try {
+        co_await sleep_for(std::chrono::seconds(30));
+      } catch (const dripcore::cancelled&) {
+        cancelled_ = true;
+      }
+      co_return;
+    }
+  private:
+    std::atomic<bool>& cancelled_;
+  };
+
+  class shutdown_initiator : public dripcore::task
+  {
+  public:
+    shutdown_initiator(dripcore::scheduler& sched) : sched_(sched) {}
+    dripcore::task_handle execute()
+    {
+      co_await sleep_for(std::chrono::milliseconds(10));
+      sched_.shutdown(std::chrono::seconds(5));
+      co_return;
+    }
+  private:
+    dripcore::scheduler& sched_;
+  };
+
+  scheduler.spawn<long_sleeper>(sleeper_cancelled);
+  scheduler.spawn<shutdown_initiator>(scheduler);
+  scheduler.run();
+
+  CHECK(sleeper_cancelled == true);
+}
+
+TEST_CASE("scheduler: forced shutdown destroys tasks after deadline"
+  * doctest::timeout(5))
+{
+  struct never_resume_awaiter
+  {
+    bool await_ready() const noexcept { return false; }
+    void await_suspend(std::coroutine_handle<>) {}
+    void await_resume() {}
+  };
+
+  dripcore::scheduler scheduler;
+  std::atomic<bool> was_cancelled{false};
+
+  class stubborn_task : public dripcore::task
+  {
+  public:
+    stubborn_task(std::atomic<bool>& cancelled) : cancelled_(cancelled) {}
+    dripcore::task_handle execute()
+    {
+      bool need_stubborn = false;
+      try {
+        co_await sleep_for(std::chrono::seconds(30));
+      } catch (const dripcore::cancelled&) {
+        cancelled_ = true;
+        need_stubborn = true;
+      }
+      if (need_stubborn) {
+        // Re-suspend on a non-dripcore awaiter that the executor cannot
+        // cancel. The deadline will expire and the frame will be
+        // force-destroyed.
+        co_await never_resume_awaiter{};
+      }
+      co_return;
+    }
+  private:
+    std::atomic<bool>& cancelled_;
+  };
+
+  class shutdown_initiator : public dripcore::task
+  {
+  public:
+    shutdown_initiator(dripcore::scheduler& sched) : sched_(sched) {}
+    dripcore::task_handle execute()
+    {
+      co_await sleep_for(std::chrono::milliseconds(10));
+      sched_.shutdown(std::chrono::milliseconds(50));
+      co_return;
+    }
+  private:
+    dripcore::scheduler& sched_;
+  };
+
+  scheduler.spawn<stubborn_task>(was_cancelled);
+  scheduler.spawn<shutdown_initiator>(scheduler);
+  scheduler.run();
+
+  CHECK(was_cancelled == true);
+}
+
+TEST_CASE("scheduler: shutdown before run cancels tasks at first suspension"
+  * doctest::timeout(2))
+{
+  dripcore::scheduler scheduler;
+  std::atomic<bool> was_cancelled{false};
+
+  class sleeper_task : public dripcore::task
+  {
+  public:
+    sleeper_task(std::atomic<bool>& cancelled) : cancelled_(cancelled) {}
+    dripcore::task_handle execute()
+    {
+      try {
+        co_await sleep_for(std::chrono::seconds(30));
+      } catch (const dripcore::cancelled&) {
+        cancelled_ = true;
+      }
+      co_return;
+    }
+  private:
+    std::atomic<bool>& cancelled_;
+  };
+
+  scheduler.spawn<sleeper_task>(was_cancelled);
+  scheduler.shutdown(std::chrono::seconds(5));
+  scheduler.run();
+
+  CHECK(was_cancelled == true);
+}

@@ -83,6 +83,17 @@ namespace dripcore
     // it will throw dripcore::cancelled). Returns the number cancelled.
     // This is the primitive the shutdown protocol and task_control build on.
     std::size_t cancel_pending();
+
+    // --- Shutdown ---
+    // Initiate a two-phase shutdown (see
+    // doc/shutdown_and_cancellation_design.md §5).
+    // Graceful: sets the shutdown flag, calls cancel_pending(), and marks
+    // every task's control block as cancelled so that running tasks throw
+    // at their next suspension point. The run() loop then drains until all
+    // tasks reach done() or the deadline expires.
+    // Forced (deadline expiry): run() destroys remaining frames, running
+    // synchronous RAII destructors only.
+    void shutdown(std::chrono::milliseconds timeout);
   private:
     void process_events(int timeout_ms);
     void on_io_event(io_awaiter* a);   // poll() callback: once-only resume
@@ -105,6 +116,10 @@ namespace dripcore
     std::multiset<timer_entry> timer_queue_;
     std::vector<std::coroutine_handle<>> ready_queue_;
     io_awaiter* io_head_ = nullptr;   // head of intrusive pending-io list
+
+    // Shutdown state (see doc/shutdown_and_cancellation_design.md §5)
+    std::atomic<bool> shutdown_requested_{false};
+    std::chrono::steady_clock::time_point shutdown_deadline_;
   };
 }
 

@@ -5,6 +5,7 @@
 #include <dripcore/task_control.h>
 #include <memory>
 #include <cstddef>
+#include <chrono>
 
 namespace dripcore
 {
@@ -28,6 +29,11 @@ namespace dripcore
 
     // Run the scheduler until all tasks complete
     void run();
+
+    // Shut down the scheduler: cancel all tasks, drain with a deadline,
+    // then force-destroy any remaining frames. See
+    // doc/shutdown_and_cancellation_design.md §5.
+    void shutdown(std::chrono::milliseconds timeout = std::chrono::seconds(5));
 
   private:
     std::unique_ptr<executor> executor_;
