@@ -64,7 +64,7 @@ namespace dripcore
       {
         // Consume the eventfd value to reset it
         uint64_t val;
-        read(wake_event_fd_, &val, sizeof(val));
+        [[maybe_unused]] auto res = read(wake_event_fd_, &val, sizeof(val));
         continue;
       }
       resume_callback(evs[i].data.ptr);
@@ -95,7 +95,7 @@ namespace dripcore
     // Write to eventfd to wake up epoll_wait
     uint64_t val = 1;
     // Ignore write errors (EAGAIN is fine, means it's already triggered)
-    (void)write(wake_event_fd_, &val, sizeof(val));
+    [[maybe_unused]] auto res = write(wake_event_fd_, &val, sizeof(val));
   }
 
   // Factory function implementation for Linux

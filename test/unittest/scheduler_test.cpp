@@ -178,13 +178,13 @@ TEST_CASE_FIXTURE(PipeFixture, "scheduler: I/O tasks are not starved by CPU-boun
     {
       // First write to the pipe so there's data to read
       const char *msg = "test";
-      write(write_fd_, msg, strlen(msg));
+      [[maybe_unused]] auto w = write(write_fd_, msg, strlen(msg));
 
       // Now wait for it to be readable
       co_await readable(read_fd_);
 
       char buf[10];
-      read(read_fd_, buf, sizeof(buf));
+      [[maybe_unused]] auto r = read(read_fd_, buf, sizeof(buf));
 
       done_ = true;
       co_return;

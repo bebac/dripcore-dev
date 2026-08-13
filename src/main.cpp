@@ -128,7 +128,7 @@ public:
 
       // Echo back
       co_await writable(socket_);
-      write(socket_.platform_handle(), buf, n);
+      [[maybe_unused]] auto res = write(socket_.platform_handle(), buf, n);
     }
 
     // Socket closes automatically
