@@ -3,6 +3,21 @@
 
 namespace dripcore
 {
+  void task_handle::promise_type::final_awaiter::await_suspend(
+    std::coroutine_handle<>
+  ) noexcept {
+    if (promise->control_block_) {
+      promise->control_block_->finished_.store(true, std::memory_order_release);
+      if (promise->control_block_->stop_continuation_) {
+        auto h = promise->control_block_->stop_continuation_;
+        promise->control_block_->stop_continuation_ = nullptr;
+        if (promise->control_block_->executor_) {
+          promise->control_block_->executor_->ready_task(h);
+        }
+      }
+    }
+  }
+
   task_handle::task_handle()
     : handle_(nullptr)
   {

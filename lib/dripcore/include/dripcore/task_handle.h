@@ -38,13 +38,16 @@ namespace dripcore
         return task_handle{std::coroutine_handle<promise_type>::from_promise(*this)};
       }
       std::suspend_always initial_suspend() noexcept { return {}; }
-      std::suspend_always final_suspend() noexcept {
-        // Publish completion before the frame can be reaped, so a retained
-        // task_control never dereferences the dangling handle.
-        if (control_block_) {
-          control_block_->finished_.store(true, std::memory_order_release);
-        }
-        return {};
+      struct final_awaiter {
+        promise_type* promise;
+        bool await_ready() noexcept { return false; }
+        // Out-of-line: needs executor::ready_task (executor.h).
+        void await_suspend(std::coroutine_handle<> h) noexcept;
+        void await_resume() noexcept {}
+      };
+
+      final_awaiter final_suspend() noexcept {
+        return {this};
       }
       void return_void() {}
       void unhandled_exception() {

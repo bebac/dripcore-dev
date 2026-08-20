@@ -733,3 +733,205 @@ TEST_CASE("scheduler: shutdown before run cancels tasks at first suspension"
 
   CHECK(was_cancelled == true);
 }
+
+// ---------------------------------------------------------------------------
+// task_control::stop() tests
+//
+// stop() cancels the target task and co_awaits its completion.  The caller
+// resumes only after the target's final_suspend() has published finished_
+// and scheduled the stop continuation via ready_task().
+// ---------------------------------------------------------------------------
+
+// Fixture for task_control stop() tests
+class TaskStopFixture : public PipeFixture
+{
+protected:
+  dripcore::scheduler scheduler;
+  std::atomic<bool> was_cancelled{false};
+  std::atomic<bool> operation_completed{false};
+  std::atomic<bool> stopper_resumed{false};
+
+  // Helper: spawns a target task, waits, then co_awaits stop()
+  template <typename TargetTask>
+  class stopper_task : public dripcore::task
+  {
+  public:
+    stopper_task(int fd, std::atomic<bool>& cancelled,
+                 std::atomic<bool>& completed, std::atomic<bool>& resumed)
+      : fd_(fd), cancelled_(cancelled), completed_(completed), resumed_(resumed) {}
+
+    dripcore::awaitable<> body() override
+    {
+      auto target = spawn<TargetTask>(fd_, cancelled_, completed_);
+      co_await sleep_for(std::chrono::milliseconds(10));
+      co_await target.stop();
+      resumed_ = true;
+      co_return;
+    }
+
+  private:
+    int fd_;
+    std::atomic<bool>& cancelled_;
+    std::atomic<bool>& completed_;
+    std::atomic<bool>& resumed_;
+  };
+};
+
+TEST_CASE_FIXTURE(TaskStopFixture,
+  "task_control: stop() cancels and waits - timer"
+  * doctest::timeout(2))
+{
+  class sleeper_task : public dripcore::task
+  {
+  public:
+    sleeper_task(int fd, std::atomic<bool>& cancelled, std::atomic<bool>& completed)
+      : cancelled_(cancelled), completed_(completed) {}
+
+    dripcore::awaitable<> body() override
+    {
+      try {
+        co_await sleep_for(std::chrono::seconds(10));
+        completed_ = true;
+      } catch (const dripcore::cancelled&) {
+        cancelled_ = true;
+      }
+      co_return;
+    }
+
+  private:
+    std::atomic<bool>& cancelled_;
+    std::atomic<bool>& completed_;
+  };
+
+  scheduler.spawn<stopper_task<sleeper_task>>(
+    -1, was_cancelled, operation_completed, stopper_resumed);
+  scheduler.run();
+
+  CHECK(was_cancelled == true);
+  CHECK(operation_completed == false);
+  CHECK(stopper_resumed == true);
+}
+
+TEST_CASE_FIXTURE(TaskStopFixture,
+  "task_control: stop() cancels and waits - io"
+  * doctest::timeout(2))
+{
+  class reader_task : public dripcore::task
+  {
+  public:
+    reader_task(int fd, std::atomic<bool>& cancelled, std::atomic<bool>& completed)
+      : fd_(fd), cancelled_(cancelled), completed_(completed) {}
+
+    dripcore::awaitable<> body() override
+    {
+      try {
+        co_await readable(fd_);
+        completed_ = true;
+      } catch (const dripcore::cancelled&) {
+        cancelled_ = true;
+      }
+      co_return;
+    }
+
+  private:
+    int fd_;
+    std::atomic<bool>& cancelled_;
+    std::atomic<bool>& completed_;
+  };
+
+  scheduler.spawn<stopper_task<reader_task>>(
+    pipefd[0], was_cancelled, operation_completed, stopper_resumed);
+  scheduler.run();
+
+  CHECK(was_cancelled == true);
+  CHECK(operation_completed == false);
+  CHECK(stopper_resumed == true);
+}
+
+TEST_CASE_FIXTURE(TaskStopFixture,
+  "task_control: stop() cancels and waits - yield"
+  * doctest::timeout(2))
+{
+  class yielder_task : public dripcore::task
+  {
+  public:
+    yielder_task(int fd, std::atomic<bool>& cancelled, std::atomic<bool>& completed)
+      : cancelled_(cancelled), completed_(completed) {}
+
+    dripcore::awaitable<> body() override
+    {
+      try {
+        for (unsigned i = 0; i < 10000000; i++) {
+          co_await yield();
+        }
+        completed_ = true;
+      } catch (const dripcore::cancelled&) {
+        cancelled_ = true;
+      }
+      co_return;
+    }
+
+  private:
+    std::atomic<bool>& cancelled_;
+    std::atomic<bool>& completed_;
+  };
+
+  scheduler.spawn<stopper_task<yielder_task>>(
+    -1, was_cancelled, operation_completed, stopper_resumed);
+  scheduler.run();
+
+  CHECK(was_cancelled == true);
+  CHECK(operation_completed == false);
+  CHECK(stopper_resumed == true);
+}
+
+TEST_CASE("task_control: stop() on already-done task returns immediately"
+  * doctest::timeout(2))
+{
+  dripcore::scheduler scheduler;
+  std::atomic<bool> task_ran{false};
+  std::atomic<bool> stopper_resumed{false};
+
+  class quick_task : public dripcore::task
+  {
+  public:
+    quick_task(std::atomic<bool>& ran) : ran_(ran) {}
+
+    dripcore::awaitable<> body() override
+    {
+      ran_ = true;
+      co_await yield();
+      co_return;
+    }
+
+  private:
+    std::atomic<bool>& ran_;
+  };
+
+  class stopper_task : public dripcore::task
+  {
+  public:
+    stopper_task(std::atomic<bool>& ran, std::atomic<bool>& resumed)
+      : ran_(ran), resumed_(resumed) {}
+
+    dripcore::awaitable<> body() override
+    {
+      auto target = spawn<quick_task>(ran_);
+      co_await sleep_for(std::chrono::milliseconds(50));
+      CHECK(target.done() == true);
+      co_await target.stop();
+      resumed_ = true;
+      co_return;
+    }
+
+  private:
+    std::atomic<bool>& ran_;
+    std::atomic<bool>& resumed_;
+  };
+
+  scheduler.spawn<stopper_task>(task_ran, stopper_resumed);
+  scheduler.run();
+
+  CHECK(task_ran == true);
+  CHECK(stopper_resumed == true);
+}

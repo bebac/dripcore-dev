@@ -33,6 +33,10 @@ namespace dripcore
     void (*cancel_func_)(void*) = nullptr;
     void* awaiter_ptr_ = nullptr;
 
+    // Continuation for co_await task_control::stop(). When the task
+    // finishes, final_suspend resumes this handle via ready_task().
+    std::coroutine_handle<> stop_continuation_ = nullptr;
+
     void register_awaiter(void (*func)(void*), void* ptr)
     {
       cancel_func_ = func;
