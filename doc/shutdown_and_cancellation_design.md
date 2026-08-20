@@ -323,26 +323,26 @@ awaiter unwinds through the awaiting coroutine and through each intervening
 
 **Cancelling a parked task propagates *downward*.** When task `T` does
 `co_await child`, `T` is not on a leaf of its own — it is parked in `child`'s
-`continuations_` (`awaitable.h:126`); the entry in the executor's suspension
-registry belongs to `child`'s leaf awaiter. So cancelling `T` means cancelling
-whatever `T` is currently awaiting, recursively, down to the leaf. The leaf
-throws `cancelled`; `child` unwinds and its `final_suspend` schedules its
-continuation (`T`) via `ready_task` (`awaitable.h:58-69`); `T` resumes and
-`child.await_resume()` rethrows the stored `exception_` (`awaitable.h:133-135`),
-so `T` sees `cancelled` too. Propagation is therefore free via the existing
+`continuation_` (a single `std::coroutine_handle<>` in the promise); the
+entry in the executor's suspension registry belongs to `child`'s leaf
+awaiter. So cancelling `T` means cancelling whatever `T` is currently
+awaiting, recursively, down to the leaf. The leaf throws `cancelled`;
+`child` unwinds and its `final_suspend` schedules its continuation (`T`)
+via `ready_task`; `T` resumes and `child.await_resume()` rethrows the stored
+`exception_`, so `T` sees `cancelled` too. Propagation is therefore free
+via the existing
 `exception_ptr` machinery — the only new state required is a single per-task
 "await edge" (one pointer, not a map) recording the one thing each suspended
 task is currently awaiting, so the executor can walk `T → child → leaf`.
 
 **Two required fixes fall out of this:**
 
-- `awaitable<T>` currently has **no destructor** and `final_suspend` is
-  `suspend_always`, so nothing destroys the child frame after it completes
-  (`awaitable.h:150-163`) — a latent leak, and the answer to "who owns the child
-  frame." The parent's `awaitable<T>` local must own it: add a `~awaitable` that
-  destroys `handle_`. Then unwinding `T` deterministically tears down the child.
-  This destructor and the downward propagation above are hard prerequisites for
-  the `task` base-class wrapper (§9), not merely a leak fix.
+- `awaitable<T>` now has a **destructor** that destroys `handle_`, owning
+  the child frame. The `final_suspend` is a custom `final_awaiter` that
+  schedules the single continuation on the ready queue (not `suspend_always`).
+  Unwinding `T` deterministically tears down the child via `~awaitable`.
+  This destructor and the downward propagation above are hard prerequisites
+  for the `task` base-class wrapper (§9), not merely a leak fix.
 - Cancelling a task therefore **must** cancel the awaitable it is awaiting;
   there is no coherent alternative, since a live `child` would hold a
   continuation into a frame being unwound.
@@ -542,9 +542,11 @@ is what makes body exceptions uniformly catchable.
   line 706) and depends on its planned MPSC submission queue and per-executor
   ownership model.
 - **`awaitable.h` / `dripcore_continuations_proposal.md`**: `awaitable<T>` is
-  implemented and already propagates exceptions via a per-promise
-  `exception_ptr`; this design adds the missing destructor (child-frame
-  ownership) and downward cancellation propagation (§7).
+  implemented and propagates exceptions via a per-promise `exception_ptr`.
+  It uses symmetric transfer with a single continuation for performance, and
+  owns the child frame via `~awaitable`. This design adds downward cancellation
+  propagation (§7). See `dripcore_continuations_proposal.md` §Design Evolution
+  for the rationale behind the single-continuation design.
 - **`.mistral-cli/notes/dripcore/multithreading/awaitable_executor_binding.md`**:
   the executor-affinity fix is a prerequisite for cross-thread `cancel()`, since
   it establishes the executor (not the OS thread) as the unit a task is bound

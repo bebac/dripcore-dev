@@ -728,12 +728,12 @@ int main() {
 The **dripcore_continuations_proposal.md** introduces `dripcore::awaitable<T>` for composable coroutine-based tasks. This proposal is **complementary** to the multithreading architecture and aligns well with the current implementation:
 
 ### ✅ Compatibility
-- **Thread-Affinity**: The continuations proposal enforces thread-affinity, which aligns perfectly with the thread-local executor design
+- **Executor-Affinity**: The continuations proposal enforces executor-affinity, which aligns perfectly with the thread-local executor design
 - **No Architecture Changes**: `awaitable<T>` requires no changes to the existing executor code (uses existing `ready_task()` method)
-- **Building Blocks**: Awaitables are designed as composable helpers used within `execute()` methods, fitting naturally with the task system
+- **Building Blocks**: Awaitables are designed as composable helpers used within `body()` methods, fitting naturally with the task system
 
 ### 🔄 Integration Points
-- **Multi-Threading Ready**: The thread-affinity enforcement in awaitables ensures they work correctly in a multi-threaded environment
+- **Multi-Threading Ready**: The executor-affinity enforcement in awaitables ensures they work correctly in a multi-threaded environment
 - **Service Composition**: Services can use awaitables for complex async operations within their lifecycle methods
 - **Channel Integration**: Awaitables can be used alongside channels for sophisticated communication patterns
 

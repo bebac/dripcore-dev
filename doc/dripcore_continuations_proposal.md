@@ -7,7 +7,7 @@ tags: [dripcore, c++, coroutines, async, design, implementation, multithreading]
 
 ## Summary
 
-This document proposes adding **continuation support** to dripcore, enabling composable coroutine-based tasks that can `co_await` each other. This addresses the current limitation where `dripcore::task_handle` cannot be awaited, forcing all logic into monolithic `execute()` methods.
+This document proposes adding **continuation support** to dripcore, enabling composable coroutine-based tasks that can `co_await` each other. This addresses the current limitation where `dripcore::task_handle` cannot be awaited, forcing all logic into monolithic `body()` methods.
 
 ## Problem Statement
 
@@ -16,7 +16,7 @@ Currently in dripcore:
 ```cpp
 class my_task : public dripcore::task {
 public:
-    dripcore::task_handle execute() {
+    dripcore::awaitable<> body() override {
         // All logic must be in this single function
         // Cannot extract helper coroutines
         // Cannot co_await other tasks
@@ -32,11 +32,15 @@ public:
 - No way to compose smaller coroutines
 - Forces monolithic task implementations
 
-## Proposed Solution
+## Solution (Implemented)
 
-### 1. New Awaitable Type: `dripcore::awaitable<T>`
+### 1. Awaitable Type: `dripcore::awaitable<T>`
 
-Add a new `dripcore::awaitable<T>` template class that is **an awaitable building block** for use within `execute()` methods. **Continuations are stored directly in the promise type** for efficiency and simplicity:
+`dripcore::awaitable<T>` is an **awaitable building block** for use within
+`body()` methods of `dripcore::task` subclasses. It uses **symmetric transfer**
+for parent→child composition and stores a **single continuation** in the
+promise — see §Design Evolution below for why the original multi-continuation
+vector was replaced.
 
 ```cpp
 namespace dripcore {
@@ -46,31 +50,18 @@ class awaitable {
 public:
     // Awaitable interface
     bool await_ready() const noexcept;
-    void await_suspend(std::coroutine_handle<> awaiting_coroutine);
-    T await_resume();
-
-    // Check if done
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> awaiting_coroutine);
+    auto await_resume();
     bool done() const;
 
     // Promise type for coroutine support
-    struct promise_type {
-        std::shared_ptr<void> holder_ptr;
-        T result_;
-        std::exception_ptr exception_;
+    using promise_type = awaitable_promise<T>;
 
-        // Continuations are stored here - no executor map needed
-        std::vector<std::coroutine_handle<>> continuations_;
-
-        // Thread safety: thread-affinity enforcement (see Multithreading section)
-        std::thread::id creating_thread_;
-
-        awaitable get_return_object();
-        std::suspend_always initial_suspend() noexcept;
-        std::suspend_always final_suspend() noexcept;
-        void return_value(T value);
-        void return_void();
-        void unhandled_exception();
-    };
+    // Move-only: the handle is transferred, source is nullified.
+    ~awaitable();
+    awaitable(awaitable&& other) noexcept;
+    awaitable(const awaitable&) = delete;
+    awaitable& operator=(const awaitable&) = delete;
 
 private:
     explicit awaitable(std::coroutine_handle<promise_type> handle);
@@ -90,54 +81,58 @@ bool awaitable<T>::await_ready() const noexcept {
     return handle_.done();
 }
 
-// await_suspend: Register this coroutine as waiting on the awaitable
-// Continuations are stored directly in the promise
-void awaitable<T>::await_suspend(std::coroutine_handle<> awaiting) {
-    if (!handle_.done()) {
-        handle_.promise().continuations_.push_back(awaiting);
-    }
+// await_suspend: Store the continuation and symmetric-transfer to the child.
+// The child runs immediately; when it completes, final_suspend schedules
+// the parent (continuation_) on the ready queue.
+std::coroutine_handle<> awaitable<T>::await_suspend(std::coroutine_handle<> awaiting) {
+    assert(executor::current() == handle_.promise().creating_executor_ &&
+           "Awaitable must be created and awaited on the same executor");
+    handle_.promise().continuation_ = awaiting;
+    return handle_;  // symmetric transfer: child runs immediately
 }
 
 // await_resume: Get result or throw exception
-T awaitable<T>::await_resume() {
+auto awaitable<T>::await_resume() {
     if (handle_.promise().exception_) {
         std::rethrow_exception(handle_.promise().exception_);
     }
-    return handle_.promise().result_;
+    if constexpr (!std::is_void_v<T>) {
+        return std::move(handle_.promise().result_);
+    }
 }
 ```
 
 #### Promise Type
 
 ```cpp
-struct awaitable<T>::promise_type {
+template<typename T>
+struct awaitable_promise_base {
     std::shared_ptr<void> holder_ptr;
-    T result_;
     std::exception_ptr exception_;
-    std::vector<std::coroutine_handle<>> continuations_;
-    std::thread::id creating_thread_;
+    std::coroutine_handle<> continuation_;  // single continuation
+    executor* creating_executor_;
 
-    promise_type() : creating_thread_(std::this_thread::get_id()) {}
-
-    awaitable get_return_object() {
-        return awaitable{std::coroutine_handle<promise_type>::from_promise(*this)};
-    }
+    awaitable_promise_base() : creating_executor_(executor::current()) {}
 
     std::suspend_always initial_suspend() noexcept { return {}; }
 
-    std::suspend_always final_suspend() noexcept {
-        // Notify all continuations directly from the promise
-        for (auto h : continuations_) {
-            if (h && !h.done()) {
-                executor::current()->ready_task(h);
+    // Custom final_suspend: schedule the continuation on the ready queue
+    // and suspend. We cannot use symmetric transfer here because the
+    // parent's ~awaitable() would destroy this (child) frame while
+    // child.resume() is still on the call stack — a use-after-free.
+    struct final_awaiter {
+        awaitable_promise_base* promise;
+        bool await_ready() noexcept { return false; }
+        void await_suspend(std::coroutine_handle<>) noexcept {
+            if (promise->continuation_) {
+                executor::current()->ready_task(promise->continuation_);
+                promise->continuation_ = {};
             }
         }
-        continuations_.clear();
-        return {};
-    }
+        void await_resume() noexcept {}
+    };
 
-    void return_value(T value) { result_ = std::move(value); }
-    void return_void() {}
+    final_awaiter final_suspend() noexcept { return {this}; }
 
     void unhandled_exception() {
         exception_ = std::current_exception();
@@ -145,29 +140,29 @@ struct awaitable<T>::promise_type {
 };
 ```
 
-#### Constructor with Auto-Spawning
+#### Constructor — No Auto-Spawning
 
 ```cpp
-// Constructor automatically schedules the coroutine
+// The child is resumed via symmetric transfer when the caller co_awaits
+// this awaitable (await_suspend returns handle_). This avoids a
+// ready-queue round-trip for the common case where the child completes
+// without suspending.
 awaitable<T>::awaitable(std::coroutine_handle<promise_type> handle)
     : handle_(handle) {
     if (handle_ && !handle_.done()) {
-        // Thread-affinity check (see Multithreading section)
-        assert(std::this_thread::get_id() == handle_.promise().creating_thread_ &&
-               "Awaitable must be created and awaited on the same thread");
-        executor::current()->ready_task(handle_);
+        assert(executor::current() == handle_.promise().creating_executor_ &&
+               "Awaitable must be created and awaited on the same executor");
     }
 }
 ```
 
 #### Executor Modifications
 
-**No changes needed!** The `ready_task` method is already public in `executor.h` (line 56), so the promise can call it directly:
+**No changes needed!** The `ready_task` method is already public in `executor.h`, so the promise can call it directly:
 
 ```cpp
 class executor {
 public:
-    // Already public - no changes needed
     void ready_task(std::coroutine_handle<> h);
 };
 ```
@@ -176,7 +171,7 @@ public:
 
 ### IMPORTANT: Awaitables are Building Blocks
 
-**Awaitables are NOT standalone tasks** - they are **composable helpers** used *within* the `execute()` method of a `dripcore::task` subclass. You **must** create a task class to spawn and execute the logic.
+**Awaitables are NOT standalone tasks** - they are **composable helpers** used *within* the `body()` method of a `dripcore::task` subclass. You **must** create a task class to spawn and execute the logic.
 
 ### Basic Task Composition
 
@@ -220,7 +215,7 @@ public:
     network_task(std::string host, int port)
         : host_(std::move(host)), port_(port) {}
 
-    dripcore::task_handle execute() {
+    dripcore::awaitable<> body() override {
         while (auto req = co_await request_ch_->recv()) {
             if (!req) break;
 
@@ -259,7 +254,7 @@ class data_fetcher_task : public dripcore::task {
 public:
     data_fetcher_task(int fd) : fd_(fd) {}
 
-    dripcore::task_handle execute() {
+    dripcore::awaitable<> body() override {
         try {
             std::string data = co_await fetch_data(fd_);
             std::cout << "Got: " << data << std::endl;
@@ -290,7 +285,7 @@ dripcore::awaitable<int> parse_response() {
 // Task class with error handling
 class api_task : public dripcore::task {
 public:
-    dripcore::task_handle execute() {
+    dripcore::awaitable<> body() override {
         try {
             int status = co_await parse_response();
             std::cout << "Status: " << status << std::endl;
@@ -320,78 +315,42 @@ This means:
 - Coroutines are tied to their creating thread's executor
 - `executor::current()` always returns the thread's own executor
 
-### Thread-Affinity for Awaitables
+### Executor-Affinity for Awaitables
 
-**Important: Awaitables must be created and awaited on the same thread.**
+**Important: Awaitables must be created and awaited on the same executor.**
 
-This is enforced in the `awaitable` constructor:
+This is enforced via debug assertions in `await_suspend` and the constructor:
 
 ```cpp
-void await_suspend(std::coroutine_handle<> awaiting) {
-    // Debug-time thread-affinity check
-    assert(std::this_thread::get_id() == handle_.promise().creating_thread_ &&
-           "Awaitable must be created and awaited on the same thread");
-    if (!handle_.done()) {
-        handle_.promise().continuations_.push_back(awaiting);
-    }
+std::coroutine_handle<> awaitable<T>::await_suspend(std::coroutine_handle<> awaiting) {
+    // Debug-time executor-affinity check
+    assert(executor::current() == handle_.promise().creating_executor_ &&
+           "Awaitable must be created and awaited on the same executor");
+    handle_.promise().continuation_ = awaiting;
+    return handle_;  // symmetric transfer
 }
 ```
 
-### Why Thread-Affinity?
+### Why Executor-Affinity?
 
 | Model | Thread Safety | Complexity | Recommended for dripcore |
 |-------|---------------|------------|---------------------------|
 | **One executor per thread** | ✅ **Naturally safe** | Low | ✅ **YES** |
 | **Shared executor across threads** | ❌ **Needs synchronization** | High | ❌ No |
 
-**Benefits of Thread-Affinity:**
-1. **No synchronization overhead**: The `continuations_` vector is only accessed from its creating thread
-2. **Matches dripcore's architecture**: Thread-local executors mean coroutines naturally stay on their thread
-3. **Clear semantics**: Awaitables are thread-local by design
+**Benefits of Executor-Affinity:**
+1. **No synchronization overhead**: The `continuation_` handle is only accessed from its creating executor
+2. **Matches dripcore's architecture**: Thread-local executors mean coroutines naturally stay on their executor
+3. **Clear semantics**: Awaitables are executor-local by design
 4. **Zero runtime cost**: Assertions have no overhead in release builds
+5. **Permits work-stealing**: Binding to the executor (not the OS thread) allows work-stealing of not-yet-started tasks while keeping `continuation_` single-threaded
 
 ### What If Cross-Thread Support is Needed Later?
 
-If dripcore ever needs cross-thread awaitable sharing, two approaches are possible:
-
-**Option A: Runtime Thread-Affinity Check**
-```cpp
-void await_suspend(std::coroutine_handle<> awaiting) {
-    if (std::this_thread::get_id() != handle_.promise().creating_thread_) {
-        throw std::runtime_error("Cross-thread awaiting not supported");
-    }
-    if (!handle_.done()) {
-        handle_.promise().continuations_.push_back(awaiting);
-    }
-}
-```
-
-**Option B: Full Synchronization** (not recommended)
-```cpp
-struct promise_type {
-    std::mutex mutex_;
-    std::vector<std::coroutine_handle<>> continuations_;
-
-    void await_suspend(std::coroutine_handle<> awaiting) {
-        std::lock_guard lock(mutex_);
-        continuations_.push_back(awaiting);
-    }
-
-    std::suspend_always final_suspend() noexcept {
-        std::vector<std::coroutine_handle<>> to_resume;
-        {
-            std::lock_guard lock(mutex_);
-            to_resume = std::move(continuations_);
-        }
-        for (auto h : to_resume) {
-            executor::current()->ready_task(h);
-        }
-        return {};
-    }
-};
-```
-
-**Recommendation:** Start with thread-affinity (Option A) and only add synchronization if cross-thread support becomes a requirement.
+If dripcore ever needs cross-thread awaitable sharing, synchronization would
+be required on the continuation mechanism. See §Design Evolution below for
+the `shared_awaitable<T>` concept, which would be the appropriate place to add
+such synchronization rather than complicating the single-continuation `awaitable<T>`.
 
 ## Design Rationale
 
@@ -403,40 +362,126 @@ struct promise_type {
 - Manual cleanup of map entries
 - More complex executor code
 
-**Improved Design (Current):**
+**Improved Design:**
 - Continuations stored directly in the promise of the awaited awaitable
 - **O(1)** access - no lookups needed
-- Automatic cleanup when awaitable completes (vector cleared in `final_suspend`)
 - **No executor changes** beyond making `ready_task` accessible (already public!)
 - More logically sound: continuations are a property of the awaitable being awaited
 
-### Benefits of Promise-Based Continuations
+### Design Evolution: Multi-Continuation Vector → Single Continuation
 
-| Aspect | Map in Executor | Continuations in Promise |
-|--------|-----------------|--------------------------|
-| **Memory** | O(N) map entries + vector overhead | O(1) per awaited awaitable |
-| **Lookup** | Hash table lookup (O(1) avg, O(N) worst) | Direct access (O(1)) |
-| **Cleanup** | Manual in executor | Automatic with awaitable destruction |
-| **Logical** | Global tracking | Continuations belong to awaitable |
-| **Complexity** | ~50 lines in executor | ~0 lines in executor |
-| **Cache Locality** | Poor (map scattered) | Excellent (with awaitable) |
+#### Original Design (Vector-Based)
 
-### Why Auto-Spawning?
-
-**Decision: NO spawn_async needed**
-
-The awaitable constructor automatically schedules the coroutine via `executor::current()->ready_task(handle_)`. This means:
+The original implementation stored a `std::vector<std::coroutine_handle<>>`
+in the promise to support **multiple awaiters on a single awaitable** — the
+"shared awaitable" pattern, analogous to `std::shared_future` or cppcoro's
+`shared_task`:
 
 ```cpp
-// Inside execute() method:
-co_await connect_task();  // Just works! Auto-spawned.
+// Original: multiple coroutines could await the same awaitable
+auto shared_work = slow_computation();
+
+// Task A
+co_await shared_work;  // registers continuation A
+
+// Task B (elsewhere, same executor)
+co_await shared_work;  // registers continuation B
+
+// When slow_computation completes, both A and B are resumed
+```
+
+The constructor auto-spawned the child on the ready queue, and `final_suspend`
+iterated over the vector to schedule all continuations.
+
+#### Problem: Performance Overhead for the Common Case
+
+In practice, every usage of `awaitable<T>` follows the **parent→child
+composition** pattern — an awaitable is constructed as a temporary and
+immediately `co_await`ed:
+
+```cpp
+co_await helper_coroutine();  // construct + await in one expression
+```
+
+No code ever shared a single awaitable across multiple awaiters. The
+"multiple continuations" test listed in the testing strategy was never
+written. The vector was an unused feature that imposed real costs:
+
+| Cost | Vector (old) | Single handle (new) |
+|-----|-------------|---------------------|
+| **Heap allocation** | `std::vector` may allocate on first `push_back` | None |
+| **Ready-queue round-trip** | Constructor auto-spawns → child runs later via queue | Symmetric transfer → child runs immediately |
+| **Cache locality** | Vector indirection | Inline `coroutine_handle<>` in promise |
+| **Memory** | 24+ bytes (vector overhead) per awaited awaitable | 8 bytes (one handle) |
+
+#### Current Design (Single Continuation + Symmetric Transfer)
+
+The current implementation replaces the vector with a single
+`std::coroutine_handle<> continuation_` and uses **symmetric transfer**:
+
+- `await_suspend` stores the parent's handle in `continuation_` and returns
+  the child's handle. The compiler performs a tail-call to resume the child
+  directly — no ready-queue round-trip, no stack growth.
+- `final_suspend` schedules `continuation_` on the ready queue (not via
+  symmetric transfer) to avoid a use-after-free: if the parent resumed
+  immediately via symmetric transfer, `~awaitable()` would destroy the
+  child frame while `child.resume()` is still on the call stack.
+- The constructor no longer auto-spawns. The child is resumed only when
+  the caller `co_awaits` the awaitable.
+
+**Limitation:** A single awaitable can only be awaited by one coroutine.
+If a second coroutine awaits an already-awaited awaitable, it silently
+overwrites the first continuation — the first awaiter would never resume.
+This is acceptable because `awaitable<T>` is move-only and consumed by
+`co_await`, making the multi-awaiter pattern structurally impossible in
+normal usage.
+
+#### Future: `shared_awaitable<T>`
+
+If the multi-awaiter pattern is ever needed, a separate `shared_awaitable<T>`
+type should be added rather than complicating `awaitable<T>`:
+
+```cpp
+auto shared_work = make_shared_awaitable(slow_computation());
+
+// Task A
+co_await shared_work;  // registers continuation A
+
+// Task B
+co_await shared_work;  // registers continuation B
+
+// When slow_computation completes, both A and B are resumed
+```
+
+| Aspect | `awaitable<T>` (current) | `shared_awaitable<T>` (hypothetical) |
+|--------|--------------------------|--------------------------------------|
+| **Continuations** | Single handle (no allocation) | Vector (heap-allocated) |
+| **Transfer** | Symmetric transfer (tail-call) | Ready-queue scheduling only |
+| **Ownership** | Move-only, consumed by `co_await` | Shareable (ref-counted or cloned) |
+| **`final_suspend`** | Schedule one continuation | Iterate and schedule all |
+| **Use case** | Parent→child composition | Multiple consumers of one result |
+
+Separate types let each be optimal for its use case. The existing
+`awaitable_promise_base` already isolates the continuation mechanism, so a
+`shared_awaitable` could share the executor-affinity, exception, and result
+machinery while swapping in a different continuation strategy.
+
+### Why No Auto-Spawning?
+
+The constructor does **not** schedule the child on the ready queue. The child
+is resumed via symmetric transfer when the caller `co_awaits` the awaitable
+(`await_suspend` returns the child's handle). This avoids a ready-queue
+round-trip for the common case where the child completes without suspending:
+
+```cpp
+// Inside body() method:
+co_await connect_task();  // child runs immediately via symmetric transfer
 ```
 
 **Benefits:**
-- Cleaner API (1 line vs 3)
-- Less error-prone (can't forget to spawn)
-- More intuitive (matches C++20 coroutine expectations)
-- Consistent with dripcore's design (all awaitables run on executor threads)
+- Eliminates one ready-queue round-trip per composition
+- Cleaner semantics: the child doesn't run until awaited
+- Matches C++20 coroutine expectations (lazy coroutines)
 
 ## Integration with Existing Code
 
@@ -450,7 +495,7 @@ Existing code continues to work:
 // Old style still works perfectly
 class old_task : public dripcore::task {
 public:
-    dripcore::task_handle execute() {
+    dripcore::awaitable<> body() override {
         // ... existing code ...
         co_await readable(fd);
         // ... more existing code ...
@@ -460,12 +505,9 @@ public:
 
 ### File Structure
 
-New file to be added:
 ```
-third_party/dripcore/lib/dripcore/include/dripcore/awaitable.h
+lib/dripcore/include/dripcore/awaitable.h
 ```
-
-No modifications needed to existing files (except potentially adding the new header to CMakeLists.txt).
 
 ## Benefits
 
@@ -474,39 +516,40 @@ No modifications needed to existing files (except potentially adding the new hea
 3. **Error Handling**: Natural try/catch support for async operations
 4. **Standard Compliance**: Follows C++20 coroutine best practices
 5. **Backward Compatible**: Existing code continues to work unchanged
-6. **Minimal Overhead**: Continuations stored with awaitable, no extra allocations
-7. **Efficient**: No hash table lookups, direct vector access
+6. **Minimal Overhead**: Single continuation handle, no heap allocation
+7. **Efficient**: Symmetric transfer avoids ready-queue round-trips
 8. **Simple API**: No spawn_async needed, just co_await
-9. **Thread-Safe by Design**: Thread-affinity prevents cross-thread issues
+9. **Executor-Safe by Design**: Executor-affinity prevents cross-executor issues
 
 ## Implementation Status
 
-- [ ] Define `dripcore::awaitable<T>` template class in `include/dripcore/awaitable.h`
-- [ ] Implement promise type with continuation vector
-- [ ] Implement auto-spawning in constructor
-- [ ] Add thread-affinity checks (assertions)
-- [ ] Write unit tests
-- [ ] Update documentation
+- [x] Define `dripcore::awaitable<T>` template class in `include/dripcore/awaitable.h`
+- [x] Implement promise type with single continuation handle
+- [x] Implement symmetric transfer in `await_suspend`
+- [x] Implement custom `final_suspend` with ready-queue scheduling
+- [x] Add executor-affinity checks (assertions)
+- [x] Implement destructor for child-frame ownership
+- [x] Write unit tests
+- [x] Update documentation
 
 ## Testing Strategy
 
-1. **Basic composition**: Awaitable A awaits Awaitable B
-2. **Multiple continuations**: Multiple coroutines waiting on one awaitable (same thread)
-3. **Error propagation**: Exceptions thrown in awaited awaitables
-4. **Value returning**: Awaitables that return values of various types
-5. **Nested awaiting**: Awaitable A awaits Awaitable B which awaits Awaitable C
-6. **Backward compatibility**: Existing tasks still work
-7. **Thread-affinity**: Verify awaitables work correctly within single thread
-8. **Stress test**: Many awaitables with many continuations
+1. **Basic composition**: Awaitable A awaits Awaitable B ✅
+2. **Error propagation**: Exceptions thrown in awaited awaitables ✅
+3. **Value returning**: Awaitables that return values of various types ✅
+4. **Nested awaiting**: Awaitable A awaits Awaitable B which awaits Awaitable C ✅
+5. **Backward compatibility**: Existing tasks still work ✅
+6. **Executor-affinity**: Verify awaitables work correctly within single executor ✅
+7. **Stress test**: Many tasks with awaitables ✅
+8. **Multiple continuations**: Removed — see §Design Evolution (would require `shared_awaitable<T>`)
 
 ## Performance Considerations
 
-- **Continuation storage**: One `std::vector` per awaited awaitable (only when awaited)
-- **Memory**: ~24 bytes per continuation (coroutine_handle is typically 8-16 bytes)
-- **Time**: O(1) to add continuation, O(N) to notify all (N = number of continuations)
-- **No overhead** for non-awaited awaitables
-- **Cache friendly**: Continuations stored with the awaitable they await
-- **No synchronization overhead**: Thread-affinity ensures single-threaded access
+- **Continuation storage**: One `std::coroutine_handle<>` per awaited awaitable (8 bytes, no allocation)
+- **Symmetric transfer**: `await_suspend` returns child handle → tail-call resume, no ready-queue round-trip
+- **Final suspend**: Schedules parent continuation on ready queue (avoids use-after-free from symmetric transfer back to parent)
+- **No overhead** for non-awaited awaitables (constructor does nothing)
+- **No synchronization overhead**: Executor-affinity ensures single-executor access
 
 ## Related Work
 
@@ -514,23 +557,34 @@ This design is inspired by:
 - [cppcoro](https://github.com/lewissbaker/cppcoro) task composition
 - [std::coroutine](https://en.cppreference.com/w/cpp/language/coroutines) standard
 - [Boost.Asio](https://www.boost.org/doc/libs/develop/libs/asio/) composed operations
+- [Lewis Baker's "C++ Coroutines: Understanding Symmetric Transfer"](https://lewissbaker.github.io/2020/05/11/understanding_symmetric_transfer)
 
 ## Conclusion
 
-Adding continuation support to dripcore via `dripcore::awaitable<T>` would enable modern, composable coroutine-based programming while maintaining full backward compatibility. The **improved design with continuations in the promise type** and **auto-spawning in the constructor** is more efficient, simpler, and more elegant than alternative approaches. The implementation is focused (~150 lines), with significant benefits for code maintainability and expressiveness.
+`dripcore::awaitable<T>` enables modern, composable coroutine-based
+programming while maintaining full backward compatibility. The design uses
+**symmetric transfer** for zero-overhead parent→child composition and a
+**single continuation** per awaitable, avoiding the heap allocation and
+ready-queue round-trips of the original vector-based approach. If multi-awaiter
+semantics are ever needed, a separate `shared_awaitable<T>` type can be added
+without modifying `awaitable<T>`.
 
 **Key Decisions:**
 - Use `dripcore::awaitable<T>` (not `task<T>` to avoid naming conflict with existing `dripcore::task`)
-- Store continuations in promise type (not in executor map)
-- Auto-spawn in constructor (no spawn_async needed)
+- Store single continuation in promise type (not vector, not in executor map)
+- Symmetric transfer in `await_suspend` (no auto-spawn in constructor)
+- Custom `final_suspend` schedules continuation via ready queue (avoids use-after-free)
 - No changes to existing executor code (ready_task already public)
-- **Enforce thread-affinity** to ensure thread safety without synchronization overhead
-- **Awaitables are building blocks** used within `execute()` methods of `dripcore::task` subclasses
+- **Enforce executor-affinity** to ensure thread safety without synchronization overhead
+- **Awaitables are building blocks** used within `body()` methods of `dripcore::task` subclasses
 
 ## Summary of Changes from Original Proposal
 
 1. **Renamed `task<T>` → `awaitable<T>`** to avoid naming conflict with existing `dripcore::task`
-2. **Clarified usage pattern**: Awaitables are helpers used within `execute()` methods, not standalone spawnable tasks
-3. **Added thread-affinity enforcement** for multithreading safety
+2. **Clarified usage pattern**: Awaitables are helpers used within `body()` methods, not standalone spawnable tasks
+3. **Added executor-affinity enforcement** for multithreading safety
 4. **Added multithreading section** explaining the design decisions
 5. **Corrected all examples** to show proper task/awaitable usage pattern
+6. **Replaced vector-based continuations with single continuation + symmetric transfer** for performance (see §Design Evolution)
+7. **Removed auto-spawning** from constructor — child resumes via symmetric transfer on `co_await`
+8. **Added destructor** for child-frame ownership (fixes latent leak)

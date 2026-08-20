@@ -4,7 +4,6 @@
 #include <dripcore/executor.h>
 
 #include <coroutine>
-#include <vector>
 #include <exception>
 #include <memory>
 #include <cassert>
@@ -26,7 +25,7 @@ namespace dripcore
   public:
     // Awaitable interface
     bool await_ready() const noexcept;
-    void await_suspend(std::coroutine_handle<> awaiting_coroutine);
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> awaiting_coroutine);
     auto await_resume();
     bool done() const;
 
@@ -57,14 +56,14 @@ namespace dripcore
   {
     std::shared_ptr<void> holder_ptr;
     std::exception_ptr exception_;
-    std::vector<std::coroutine_handle<>> continuations_;
+    std::coroutine_handle<> continuation_;
 
     // Executor-affinity (not thread-affinity): the executor on which this
     // awaitable was created. Under the executor-pinning model a task never
     // migrates executors after first resume, so the awaitable is only ever
     // awaited on this same executor. Binding to the executor (rather than the
     // OS thread) is what permits work-stealing of not-yet-started tasks while
-    // keeping continuations_ single-threaded and lock-free.
+    // keeping continuation_ single-threaded and lock-free.
     // See doc/shutdown_and_cancellation_design.md (Design Principle 3).
     executor* creating_executor_;
 
@@ -72,21 +71,36 @@ namespace dripcore
 
     std::suspend_always initial_suspend() noexcept { return {}; }
 
-    std::suspend_always final_suspend() noexcept
+    // Custom final_suspend: schedule the continuation on the ready queue
+    // and suspend. We cannot use symmetric transfer here because the
+    // parent's ~awaitable() would destroy this (child) frame while
+    // child.resume() is still on the call stack — a use-after-free.
+    // Routing through the ready queue ensures child.resume() returns
+    // before the parent resumes and destroys the child frame.
+    struct final_awaiter
     {
-      // Notify all continuations directly from the promise.
-      // Intentionally use executor::current() (not creating_executor_): under
-      // executor-pinning the two are equal, and routing through current()
-      // avoids manufacturing a cross-executor scheduling path.
-      for (auto h : continuations_)
+      awaitable_promise_base* promise;
+
+      bool await_ready() noexcept
       {
-        if (h && !h.done())
+        return false;
+      }
+
+      void await_suspend(std::coroutine_handle<>) noexcept
+      {
+        if (promise->continuation_)
         {
-          executor::current()->ready_task(h);
+          executor::current()->ready_task(promise->continuation_);
+          promise->continuation_ = {};
         }
       }
-      continuations_.clear();
-      return {};
+
+      void await_resume() noexcept {}
+    };
+
+    final_awaiter final_suspend() noexcept
+    {
+      return {this};
     }
 
     void unhandled_exception()
@@ -113,7 +127,7 @@ namespace dripcore
   };
 
   // Promise type for void awaitables
-  template<> 
+  template<>
   struct awaitable_promise<void> final : awaitable_promise_base<void>
   {
     awaitable<void> get_return_object()
@@ -135,16 +149,14 @@ namespace dripcore
   }
 
   template<typename T>
-  void awaitable<T>::await_suspend(std::coroutine_handle<> awaiting)
+  std::coroutine_handle<> awaitable<T>::await_suspend(std::coroutine_handle<> awaiting)
   {
     // Executor-affinity check - MUST be awaited on the executor it was created on.
     assert(executor::current() == handle_.promise().creating_executor_ &&
            "Awaitable must be created and awaited on the same executor");
 
-    if (!handle_.done())
-    {
-      handle_.promise().continuations_.push_back(awaiting);
-    }
+    handle_.promise().continuation_ = awaiting;
+    return handle_;  // symmetric transfer: child runs immediately
   }
 
   template<typename T>
@@ -166,7 +178,10 @@ namespace dripcore
     return handle_.done();
   }
 
-  // Constructor with auto-spawning
+  // Constructor — no auto-spawn. The child is resumed via symmetric
+  // transfer when the caller co_awaits this awaitable (await_suspend
+  // returns handle_). This avoids a ready-queue round-trip for the
+  // common case where the child completes without suspending.
   template<typename T>
   awaitable<T>::awaitable(std::coroutine_handle<promise_type> handle)
       : handle_(handle)
@@ -176,9 +191,6 @@ namespace dripcore
       // Executor-affinity check
       assert(executor::current() == handle_.promise().creating_executor_ &&
              "Awaitable must be created and awaited on the same executor");
-
-      // Auto-spawn: Schedule the coroutine on the current executor
-      executor::current()->ready_task(handle_);
     }
   }
 
