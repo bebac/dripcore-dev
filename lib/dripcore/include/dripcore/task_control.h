@@ -61,6 +61,15 @@ namespace dripcore
     // Check if the controlled task has completed
     bool done() const;
 
+    // Check if the task was cancelled (externally via cancel()/stop() or
+    // self-thrown). Only meaningful after done() returns true.
+    bool cancelled() const;
+
+    // Get the exception that caused the task to fail, or nullptr if the
+    // task completed normally or was cancelled. Only meaningful after
+    // done() returns true. See doc/shutdown_and_cancellation_design.md §4.
+    std::exception_ptr exception() const;
+
     // Request cancellation of the task (fire-and-forget).
     // Phase 2: must be called from the executor's thread.
     void cancel();

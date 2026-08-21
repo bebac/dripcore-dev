@@ -5,6 +5,7 @@
 #include <dripcore/awaitable.h>
 #include <dripcore/sleep_awaiter.h>
 #include <dripcore/task_control_block.h>
+#include <dripcore/cancelled.h>
 #include <concepts>
 #include <memory>
 #include <exception>
@@ -32,6 +33,14 @@ namespace dripcore
       std::exception_ptr ep;
       try {
         co_await body();
+      } catch (const dripcore::cancelled&) {
+        // Cancellation is normal termination. Mark the control block
+        // so task_control::cancelled() returns true. The exception is
+        // not rethrown, so no exception is stored in the control block.
+        // See doc/shutdown_and_cancellation_design.md §4.
+        if (control_block_) {
+          control_block_->cancelled_.store(true, std::memory_order_release);
+        }
       } catch (...) {
         ep = std::current_exception();
       }

@@ -5,6 +5,7 @@
 #include <memory>
 #include <cstddef>
 #include <coroutine>
+#include <exception>
 
 namespace dripcore
 {
@@ -28,6 +29,13 @@ namespace dripcore
     std::atomic<bool> finished_{false};
 
     std::atomic<bool> cancelled_{false};
+
+    // Exception that caused the task to fail (non-cancelled). Transferred
+    // from the promise in final_awaiter::await_suspend() before finished_
+    // is published. Safe to read after done() returns true, because the
+    // release store of finished_ synchronizes with the acquire load in
+    // task_control::done(). See doc/shutdown_and_cancellation_design.md §4.
+    std::exception_ptr exception_;
 
     // Type-erased cancellation: function pointer + context
     void (*cancel_func_)(void*) = nullptr;

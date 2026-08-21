@@ -18,6 +18,22 @@ namespace dripcore
     return control_block_->finished_.load(std::memory_order_acquire);
   }
 
+  bool task_control::cancelled() const
+  {
+    if (!control_block_) return false;
+    return control_block_->cancelled_.load(std::memory_order_acquire);
+  }
+
+  std::exception_ptr task_control::exception() const
+  {
+    if (!control_block_) return nullptr;
+    // Safe to read without atomics: the release store of finished_ in
+    // final_awaiter::await_suspend() synchronizes with the acquire load
+    // in done(). A caller that observes done() == true is guaranteed to
+    // see the write to exception_ that happened before that release store.
+    return control_block_->exception_;
+  }
+
   void task_control::cancel()
   {
     if (!control_block_) return;

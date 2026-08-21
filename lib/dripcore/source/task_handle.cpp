@@ -7,6 +7,13 @@ namespace dripcore
     std::coroutine_handle<>
   ) noexcept {
     if (promise->control_block_) {
+      // Transfer any exception to the control block before publishing
+      // finished_. This lets a task_control holder observe the failure
+      // after the task completes, even though the coroutine frame is
+      // destroyed shortly after. See doc/shutdown_and_cancellation_design.md §4.
+      if (promise->exception_) {
+        promise->control_block_->exception_ = std::move(promise->exception_);
+      }
       promise->control_block_->finished_.store(true, std::memory_order_release);
       if (promise->control_block_->stop_continuation_) {
         auto h = promise->control_block_->stop_continuation_;

@@ -935,3 +935,209 @@ TEST_CASE("task_control: stop() on already-done task returns immediately"
   CHECK(task_ran == true);
   CHECK(stopper_resumed == true);
 }
+
+// ---------------------------------------------------------------------------
+// task_control::exception() and task_control::cancelled() tests
+//
+// exception propagation from the task promise to the task_control_block
+// lets a task_control holder observe how a task terminated after it
+// completes. See doc/shutdown_and_cancellation_design.md §4.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("task_control: exception() returns failure exception after task completes"
+  * doctest::timeout(2))
+{
+  dripcore::scheduler scheduler;
+
+  class failing_task : public dripcore::task
+  {
+  public:
+    failing_task(std::atomic<bool>& ran) : ran_(ran) {}
+    dripcore::awaitable<> body() override
+    {
+      ran_ = true;
+      co_await yield();
+      throw std::runtime_error("task failed");
+    }
+  private:
+    std::atomic<bool>& ran_;
+  };
+
+  std::atomic<bool> task_ran{false};
+  auto tc = scheduler.spawn<failing_task>(task_ran);
+  CHECK(tc.done() == false);
+
+  scheduler.run();
+
+  CHECK(task_ran == true);
+  CHECK(tc.done() == true);
+  CHECK(tc.cancelled() == false);
+  REQUIRE(tc.exception() != nullptr);
+  try {
+    std::rethrow_exception(tc.exception());
+    CHECK(false); // should not reach
+  } catch (const std::runtime_error& e) {
+    CHECK(std::string(e.what()) == "task failed");
+  }
+}
+
+TEST_CASE("task_control: cancelled() is true and exception() is null after cancel"
+  * doctest::timeout(2))
+{
+  dripcore::scheduler scheduler;
+  std::atomic<bool> was_cancelled{false};
+
+  class sleeper_task : public dripcore::task
+  {
+  public:
+    sleeper_task(std::atomic<bool>& cancelled) : cancelled_(cancelled) {}
+    dripcore::awaitable<> body() override
+    {
+      try {
+        co_await sleep_for(std::chrono::seconds(30));
+      } catch (const dripcore::cancelled&) {
+        cancelled_ = true;
+      }
+      co_return;
+    }
+  private:
+    std::atomic<bool>& cancelled_;
+  };
+
+  class canceller_task : public dripcore::task
+  {
+  public:
+    canceller_task(dripcore::task_control& target)
+      : target_(target) {}
+    dripcore::awaitable<> body() override
+    {
+      co_await sleep_for(std::chrono::milliseconds(10));
+      target_.cancel();
+      co_return;
+    }
+  private:
+    dripcore::task_control& target_;
+  };
+
+  auto tc = scheduler.spawn<sleeper_task>(was_cancelled);
+  scheduler.spawn<canceller_task>(tc);
+  scheduler.run();
+
+  CHECK(was_cancelled == true);
+  CHECK(tc.done() == true);
+  CHECK(tc.cancelled() == true);
+  CHECK(tc.exception() == nullptr);
+}
+
+TEST_CASE("task_control: self-thrown cancelled sets cancelled() and leaves exception() null"
+  * doctest::timeout(2))
+{
+  dripcore::scheduler scheduler;
+  std::atomic<bool> task_ran{false};
+
+  class self_cancel_task : public dripcore::task
+  {
+  public:
+    self_cancel_task(std::atomic<bool>& ran) : ran_(ran) {}
+    dripcore::awaitable<> body() override
+    {
+      ran_ = true;
+      co_await yield();
+      throw dripcore::cancelled{};
+    }
+  private:
+    std::atomic<bool>& ran_;
+  };
+
+  auto tc = scheduler.spawn<self_cancel_task>(task_ran);
+  scheduler.run();
+
+  CHECK(task_ran == true);
+  CHECK(tc.done() == true);
+  CHECK(tc.cancelled() == true);
+  CHECK(tc.exception() == nullptr);
+}
+
+TEST_CASE("task_control: normal completion has no exception and is not cancelled"
+  * doctest::timeout(2))
+{
+  dripcore::scheduler scheduler;
+  std::atomic<bool> task_ran{false};
+
+  class simple_task : public dripcore::task
+  {
+  public:
+    simple_task(std::atomic<bool>& ran) : ran_(ran) {}
+    dripcore::awaitable<> body() override
+    {
+      ran_ = true;
+      co_await yield();
+      co_return;
+    }
+  private:
+    std::atomic<bool>& ran_;
+  };
+
+  auto tc = scheduler.spawn<simple_task>(task_ran);
+  scheduler.run();
+
+  CHECK(task_ran == true);
+  CHECK(tc.done() == true);
+  CHECK(tc.cancelled() == false);
+  CHECK(tc.exception() == nullptr);
+}
+
+TEST_CASE("task_control: stop() on failing task propagates exception"
+  * doctest::timeout(2))
+{
+  dripcore::scheduler scheduler;
+  std::atomic<bool> stopper_resumed{false};
+
+  class failing_task : public dripcore::task
+  {
+  public:
+    failing_task(std::atomic<bool>& started) : started_(started) {}
+    dripcore::awaitable<> body() override
+    {
+      started_ = true;
+      co_await yield();
+      throw std::logic_error("boom");
+    }
+  private:
+    std::atomic<bool>& started_;
+  };
+
+  class stopper_task : public dripcore::task
+  {
+  public:
+    stopper_task(std::atomic<bool>& resumed, dripcore::task_control& target)
+      : resumed_(resumed), target_(target) {}
+    dripcore::awaitable<> body() override
+    {
+      auto child = spawn<failing_task>(started_);
+      co_await sleep_for(std::chrono::milliseconds(50));
+      CHECK(child.done() == true);
+      CHECK(child.cancelled() == false);
+      REQUIRE(child.exception() != nullptr);
+      try {
+        std::rethrow_exception(child.exception());
+        CHECK(false);
+      } catch (const std::logic_error& e) {
+        CHECK(std::string(e.what()) == "boom");
+      }
+      co_await child.stop();
+      resumed_ = true;
+      co_return;
+    }
+  private:
+    std::atomic<bool>& resumed_;
+    dripcore::task_control& target_;
+    std::atomic<bool> started_{false};
+  };
+
+  dripcore::task_control tc;
+  scheduler.spawn<stopper_task>(stopper_resumed, tc);
+  scheduler.run();
+
+  CHECK(stopper_resumed == true);
+}
