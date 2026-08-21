@@ -16,9 +16,13 @@ This document proposes a redesign of DripCore's scheduler to support multi-core 
 - **Backward Compatibility**: Existing code continues to work with the new architecture
 
 ### ✅ Additional Features Implemented (Beyond Original Proposal)
-- **Channel Support**: Full `channel<T>` implementation with non-blocking `try_send()` and blocking `recv()` awaiter, `close()` support
+- **Channel Support**: Full `channel<T>` implementation with `try_send()`, `send()` (awaitable/blocking), `try_recv()`, `recv()` (awaitable), `close()` support, and cancellation integration
 - **Timer Support**: Timer wheel in executor with `register_timer()`, `sleep_for()` support via `sleep_awaiter`
 - **Sleep Primitives**: `task::sleep_for()` method for convenient sleep operations
+- **Cancellation & Shutdown**: `dripcore::cancelled` exception, `task_control` with `cancel()`, `stop()`, `cancelled()`, `exception()`; `scheduler::shutdown()` with graceful drain + forced frame-destroy (see `doc/shutdown_and_cancellation_design.md`)
+- **Task Base Class**: `execute()` delegates to virtual `body()`/`teardown()`; `teardown()` is always-run async cleanup (see `doc/shutdown_and_cancellation_design.md §9`)
+- **Exception Propagation**: Non-cancelled exceptions transferred from task promise to `task_control_block`, observable via `task_control::exception()` after `done()`
+- **Awaitable Composition**: `dripcore::awaitable<T>` with symmetric transfer, single continuation, child-frame ownership (see `doc/dripcore_continuations_proposal.md`)
 
 ### ⏳ Remaining (Phase 3+)
 - **Multi-Threading**: Multiple executor threads with work distribution
@@ -82,7 +86,8 @@ Multi-core systems cannot be utilized. This is the primary remaining limitation.
 - **Service abstraction**: No supervised, long-running component support
 
 #### 3. Partially Implemented Building Blocks
-- **Channels**: ✅ FULLY IMPLEMENTED - Non-blocking `try_send()` with blocking `recv()` awaiter, `close()` support
+- **Channels**: ✅ FULLY IMPLEMENTED - `try_send()`, `send()` (awaitable), `try_recv()`, `recv()` (awaitable), `close()` support, cancellation integration
+- **Cancellation & Shutdown**: ✅ FULLY IMPLEMENTED - `task_control` with `cancel()`, `stop()`, `cancelled()`, `exception()`; `scheduler::shutdown()` (see `doc/shutdown_and_cancellation_design.md`)
 - **Services**: ❌ NOT IMPLEMENTED - No `service` or `service_supervisor` classes
 - **Timers**: ✅ FULLY IMPLEMENTED - Timer wheel in executor, `sleep_for()` support
 - **Work stealing**: ❌ NOT IMPLEMENTED - No work-stealing deques or global queue
@@ -96,7 +101,9 @@ Multi-core systems cannot be utilized. This is the primary remaining limitation.
 2. **Executor** → ✅ Per-thread event loop - fully implemented with thread-local accessor
 3. **Task** → ✅ Lightweight coroutine - uses `executor::current()` instead of raw pointers
 4. **Service** → ❌ NOT YET IMPLEMENTED - Supervised, long-running component
-5. **Channel** → ✅ FULLY IMPLEMENTED - Type-safe queues with non-blocking send, blocking receive awaiter
+5. **Channel** → ✅ FULLY IMPLEMENTED - Type-safe queues with `try_send()`, `send()` (awaitable), `try_recv()`, `recv()` (awaitable), `close()`
+6. **Cancellation** → ✅ FULLY IMPLEMENTED - `task_control` with `cancel()`, `stop()`, `cancelled()`, `exception()`; `scheduler::shutdown()` (see `doc/shutdown_and_cancellation_design.md`)
+7. **Awaitable** → ✅ FULLY IMPLEMENTED - `dripcore::awaitable<T>` with symmetric transfer (see `doc/dripcore_continuations_proposal.md`)
 
 **Ownership Model** (Implemented):
 - ✅ Tasks own their state, not raw scheduler pointers
@@ -426,25 +433,33 @@ private:
 
 Type-safe, bounded channels for inter-task communication:
 
-**Note**: Current implementation provides non-blocking send (`try_send()`) and blocking receive (`recv()`). 
-A full MPSC channel with blocking send would require additional `send_waiters_` vector.
+**Note**: The channel is fully implemented with `try_send()`, `send()` (awaitable/blocking
+with multiple waiting senders), `try_recv()`, `recv()` (awaitable), and `close()`.
+Cancellation is integrated: suspended `recv()` and `send()` awaiters register with
+the task control block and throw `dripcore::cancelled` on cancellation.
 
 ```cpp
 template<typename T>
 class channel {
 public:
-    explicit channel(size_t capacity); // capacity=0 means unbounded
+    explicit channel(size_t capacity);
     
     // Non-blocking send (returns false if full or closed)
     bool try_send(T value);
     
-    // Receive (blocks if empty) - returns nullopt if channel closed
-    auto recv() {
-        return recv_awaiter{this};
-    }
+    // Awaitable/blocking send (suspends if full, resumes when space available)
+    // Returns true if sent, false if channel closed.
+    auto send(dripcore::task* task, T value);
+    
+    // Non-blocking receive (returns nullopt if empty)
+    std::optional<T> try_recv();
+    
+    // Awaitable/blocking receive (suspends if empty, resumes when data available)
+    // Returns nullopt if channel closed and buffer empty.
+    auto recv(dripcore::task* task);
     
     // Lifecycle
-    void close();
+    void close();  // wakes all waiting senders and receivers
     bool is_closed() const;
     size_t size() const;
     bool empty() const;
@@ -455,29 +470,7 @@ private:
     bool closed_{false};
     
     std::coroutine_handle<> waiting_receiver_ = nullptr;
-};
-
-struct recv_awaiter {
-    channel* ch_;
-    
-    bool await_ready() {
-        // Don't suspend if there's data or the channel is closed
-        return !ch_->buffer_.empty() || ch_->closed_;
-    }
-    
-    void await_suspend(std::coroutine_handle<> h) {
-        ch_->waiting_receiver_ = h;
-    }
-    
-    std::optional<T> await_resume() {
-        if (ch_->buffer_.empty()) {
-            return std::nullopt;  // Channel closed, no more data
-        }
-        
-        T value = std::move(ch_->buffer_.front());
-        ch_->buffer_.pop_front();
-        return value;
-    }
+    std::deque<send_awaiter*> waiting_senders_;
 };
 ```
 
@@ -591,9 +584,13 @@ bool executor::try_steal_work() {
 - ✅ **Goal achieved**: New interfaces proven out
 
 ### ✅ Phase 2.5: Additional Features (Implemented Beyond Original Plan)
-- ✅ **Channel Implementation**: Full `channel<T>` with non-blocking `try_send()`, blocking `recv()` awaiter, close support
+- ✅ **Channel Implementation**: Full `channel<T>` with `try_send()`, `send()` (awaitable), `try_recv()`, `recv()` (awaitable), close support
 - ✅ **Timer Support**: Timer wheel in executor, `sleep_for()` via `sleep_awaiter`
 - ✅ **Event System**: Cross-platform event notification (eventfd on Linux, self-pipe on macOS)
+- ✅ **Cancellation & Shutdown**: `dripcore::cancelled`, `task_control` with `cancel()`/`stop()`/`cancelled()`/`exception()`, `scheduler::shutdown()` (see `doc/shutdown_and_cancellation_design.md`)
+- ✅ **Task Base Class**: `execute()` → `body()`/`teardown()` wrapper with always-run async cleanup
+- ✅ **Exception Propagation**: Non-cancelled exceptions transferred to `task_control_block`, observable via `task_control::exception()`
+- ✅ **Awaitable Composition**: `dripcore::awaitable<T>` with symmetric transfer (see `doc/dripcore_continuations_proposal.md`)
 
 ### ⏳ Phase 3: Multi-Threading - NOT STARTED
 - ❌ Spawn multiple executor threads
@@ -603,7 +600,10 @@ bool executor::try_steal_work() {
 - **Goal**: Utilize multiple cores
 
 ### ⏳ Phase 4: High-Level Abstractions - PARTIALLY COMPLETED
-- ✅ Implement `channel<T>` - FULLY COMPLETED
+- ✅ Implement `channel<T>` - FULLY COMPLETED (with `send()`, `try_recv()`)
+- ✅ Implement `task_control` with `cancel()`/`stop()`/`cancelled()`/`exception()` - FULLY COMPLETED
+- ✅ Implement `scheduler::shutdown()` - FULLY COMPLETED
+- ✅ Implement `awaitable<T>` composition - FULLY COMPLETED
 - ❌ Implement `service` and `service_supervisor` - NOT STARTED
 - ✅ Add timer wheel to executor - FULLY COMPLETED
 - **Goal**: Production-ready building blocks
@@ -703,7 +703,7 @@ int main() {
 3. **Backpressure**: How should channel send/recv handle overload?
 4. **Error Handling**: How do service failures propagate to supervisor?
 5. **Metrics**: What observability should be built-in (queue depths, task counts, etc.)?
-6. **Cancellation**: Should tasks be cancellable? How to propagate cancellation?
+6. **Cancellation**: ✅ **Resolved** — Fully implemented for single-executor. `task_control::cancel()` (fire-and-forget), `task_control::stop()` (cancel + co_await completion), `scheduler::shutdown()` (graceful + forced). See `doc/shutdown_and_cancellation_design.md`. Cross-thread `cancel()` deferred to Phase 3.
 
 ## Performance Expectations
 
@@ -746,9 +746,12 @@ The **dripcore_continuations_proposal.md** introduces `dripcore::awaitable<T>` f
 
 ### ✅ What's Done (Production-Ready)
 - **Core Architecture**: Scheduler/Executor separation with thread-local access
-- **Task System**: Clean coroutine-based tasks with proper lifetime management
+- **Task System**: Clean coroutine-based tasks with `body()`/`teardown()` wrapper for always-run async cleanup
 - **I/O Multiplexing**: Platform-abstracted event loops (kqueue/epoll) with ONESHOT semantics
-- **Channels**: Full channel implementation with non-blocking send, coroutine-friendly receive awaiter
+- **Channels**: Full channel implementation with `try_send()`, `send()` (awaitable), `try_recv()`, `recv()` (awaitable), `close()`
+- **Cancellation & Shutdown**: `task_control` with `cancel()`, `stop()`, `cancelled()`, `exception()`; `scheduler::shutdown()` with graceful drain + forced frame-destroy
+- **Exception Propagation**: Non-cancelled exceptions transferred to `task_control_block`, observable via `task_control::exception()` after `done()`
+- **Awaitable Composition**: `dripcore::awaitable<T>` with symmetric transfer for parent→child coroutine composition
 - **Timers**: Efficient timer wheel with `sleep_for()` support
 - **Memory Safety**: `shared_ptr` ownership model prevents premature destruction
 - **Wake Notifications**: Event-based wakeup for efficient task scheduling

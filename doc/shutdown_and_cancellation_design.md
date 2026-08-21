@@ -19,7 +19,9 @@ single-executor implementation.
 This is a design proposal, not an implementation plan. It exists to reach
 agreement on the model before any code is written.
 
-**Status:** Draft — for discussion.
+**Status:** Implemented (single-executor). All near-term items (§"Applicability",
+lines 456–466) are done. Cross-thread `cancel()` and the `service`/
+`service_supervisor` stop protocol (§8) remain deferred to Phase 3.
 
 ## Problem Statement
 
@@ -216,12 +218,20 @@ for an awaiter already cancelled.
 ```cpp
 class task_control {
 public:
-    void cancel();          // request cooperative cancellation
+    void cancel();          // request cooperative cancellation (fire-and-forget)
+    auto stop();            // cancel + co_await completion (awaitable)
     bool done() const;      // completed or cancelled
+    bool cancelled() const; // task was cancelled (externally or self-thrown)
+    std::exception_ptr exception() const;  // failure exception, or nullptr
 private:
-    std::shared_ptr<task_control_block> cb_;  // { executor*, coroutine_handle, state }
+    std::shared_ptr<task_control_block> cb_;  // { executor*, handle, state, exception_ }
 };
 ```
+
+`stop()` is the composition primitive: it cancels the target and suspends the
+caller until the target's `final_suspend()` publishes `finished_` and schedules
+the stop continuation via `ready_task()`. This lets a parent task await a
+child's full termination — including its `teardown()` — before proceeding.
 
 `cancel()` does **not** touch task state directly. It posts a cancellation
 request to the owning executor:
@@ -450,19 +460,20 @@ Everything above degrades cleanly to one executor / one thread:
   just the existing run-loop with a deadline, and the forced phase is
   frame-destroy on expiry.
 
-Recommended near-term subset (single executor), assuming agreement on the
-model:
+Recommended near-term subset (single executor) — **all implemented**:
 
-1. Stop `unhandled_exception()` from terminating; define `dripcore::cancelled`.
-2. Add executor back-pointer, `handle_`, `cancelled_`, and destructor
+1. ✅ Stop `unhandled_exception()` from terminating; define `dripcore::cancelled`.
+2. ✅ Add executor back-pointer, `handle_`, `cancelled_`, and destructor
    deregistration to `io_awaiter` (and `sleep_awaiter`).
-3. Add the per-executor suspension registry and check-and-clear in `poll()`.
-4. Return `task_control` from `spawn`; implement same-thread `cancel()`.
-5. Add `scheduler::shutdown()` with both phases (graceful drain + forced
+3. ✅ Add the per-executor suspension registry and check-and-clear in `poll()`.
+4. ✅ Return `task_control` from `spawn`; implement same-thread `cancel()`.
+   Also implemented: `stop()` (cancel + co_await completion), `cancelled()`,
+   and `exception()` (exception propagation from promise to control block, §4).
+5. ✅ Add `scheduler::shutdown()` with both phases (graceful drain + forced
    frame-destroy on deadline) and make `run()` exit on it.
-6. Give `awaitable<T>` a destructor that owns/destroys its child frame (fixes
+6. ✅ Give `awaitable<T>` a destructor that owns/destroys its child frame (fixes
    the current leak, §7).
-7. Convert `task` so `execute()` is a base-class wrapper delegating to virtual
+7. ✅ Convert `task` so `execute()` is a base-class wrapper delegating to virtual
    `body()`/`teardown()`; migrate existing tasks (§9).
 
 Deferred to Phase 3: MPSC-based cross-thread `cancel()`, shutdown fan-out and
