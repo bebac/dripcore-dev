@@ -500,3 +500,339 @@ TEST_CASE("channel: recv task is cancelled via task_control"
   CHECK(was_cancelled == true);
   CHECK(recv_completed == false);
 }
+
+TEST_CASE("channel: try_recv returns nullopt on empty channel")
+{
+  dripcore::scheduler sched;
+  auto ch = std::make_shared<dripcore::channel<int>>(4);
+  std::atomic<bool> got_nullopt = false;
+
+  class test_task : public dripcore::task {
+  public:
+    test_task(std::shared_ptr<dripcore::channel<int>> ch, std::atomic<bool>& result)
+      : ch_(ch), result_(result) {}
+
+    dripcore::awaitable<> body() override {
+      result_ = !ch_->try_recv().has_value();
+      co_return;
+    }
+
+  private:
+    std::shared_ptr<dripcore::channel<int>> ch_;
+    std::atomic<bool>& result_;
+  };
+
+  sched.spawn<test_task>(ch, got_nullopt);
+  sched.run();
+  CHECK(got_nullopt == true);
+}
+
+TEST_CASE("channel: try_recv returns sent values")
+{
+  dripcore::scheduler sched;
+  auto ch = std::make_shared<dripcore::channel<int>>(4);
+  std::atomic<int> v1 = -1;
+  std::atomic<int> v2 = -1;
+
+  class test_task : public dripcore::task {
+  public:
+    test_task(std::shared_ptr<dripcore::channel<int>> ch,
+              std::atomic<int>& v1, std::atomic<int>& v2)
+      : ch_(ch), v1_(v1), v2_(v2) {}
+
+    dripcore::awaitable<> body() override {
+      ch_->try_send(10);
+      ch_->try_send(20);
+      v1_ = ch_->try_recv().value_or(-1);
+      v2_ = ch_->try_recv().value_or(-1);
+      co_return;
+    }
+
+  private:
+    std::shared_ptr<dripcore::channel<int>> ch_;
+    std::atomic<int>& v1_;
+    std::atomic<int>& v2_;
+  };
+
+  sched.spawn<test_task>(ch, v1, v2);
+  sched.run();
+  CHECK(v1 == 10);
+  CHECK(v2 == 20);
+}
+
+TEST_CASE("channel: try_recv drains remaining items after close")
+{
+  dripcore::scheduler sched;
+  auto ch = std::make_shared<dripcore::channel<int>>(4);
+  std::atomic<int> v1 = -1;
+  std::atomic<int> v2 = -1;
+  std::atomic<bool> v3_empty = false;
+
+  class test_task : public dripcore::task {
+  public:
+    test_task(std::shared_ptr<dripcore::channel<int>> ch,
+              std::atomic<int>& v1, std::atomic<int>& v2, std::atomic<bool>& v3)
+      : ch_(ch), v1_(v1), v2_(v2), v3_(v3) {}
+
+    dripcore::awaitable<> body() override {
+      ch_->try_send(10);
+      ch_->try_send(20);
+      ch_->close();
+      v1_ = ch_->try_recv().value_or(-1);
+      v2_ = ch_->try_recv().value_or(-1);
+      v3_ = !ch_->try_recv().has_value();
+      co_return;
+    }
+
+  private:
+    std::shared_ptr<dripcore::channel<int>> ch_;
+    std::atomic<int>& v1_;
+    std::atomic<int>& v2_;
+    std::atomic<bool>& v3_;
+  };
+
+  sched.spawn<test_task>(ch, v1, v2, v3_empty);
+  sched.run();
+  CHECK(v1 == 10);
+  CHECK(v2 == 20);
+  CHECK(v3_empty == true);
+}
+
+TEST_CASE("channel: send suspends when full and resumes when space available" * doctest::timeout(1))
+{
+  dripcore::scheduler sched;
+  auto ch = std::make_shared<dripcore::channel<int>>(2);
+  std::atomic<int> received = -1;
+  std::atomic<bool> send_completed = false;
+
+  class producer : public dripcore::task {
+  public:
+    producer(std::shared_ptr<dripcore::channel<int>> ch, std::atomic<bool>& done)
+      : ch_(ch), done_(done) {}
+
+    dripcore::awaitable<> body() override {
+      ch_->try_send(1); // Fill slot 1
+      ch_->try_send(2); // Fill slot 2 (buffer full)
+      // This should suspend because the buffer is full
+      bool ok = co_await ch_->send(this, 3);
+      done_ = ok;
+      ch_->close();
+      co_return;
+    }
+
+  private:
+    std::shared_ptr<dripcore::channel<int>> ch_;
+    std::atomic<bool>& done_;
+  };
+
+  class consumer : public dripcore::task {
+  public:
+    consumer(std::shared_ptr<dripcore::channel<int>> ch, std::atomic<int>& recv)
+      : ch_(ch), recv_(recv) {}
+
+    dripcore::awaitable<> body() override {
+      co_await yield(); // Let producer fill the buffer and suspend on send
+      auto val = co_await ch_->recv(this);
+      recv_ = val.value_or(-1); // Should be 1, freeing a slot for the sender
+      co_return;
+    }
+
+  private:
+    std::shared_ptr<dripcore::channel<int>> ch_;
+    std::atomic<int>& recv_;
+  };
+
+  sched.spawn<producer>(ch, send_completed);
+  sched.spawn<consumer>(ch, received);
+  sched.run();
+
+  CHECK(received == 1);
+  CHECK(send_completed == true);
+  CHECK(ch->size() == 2); // [2, 3] remaining in buffer
+}
+
+TEST_CASE("channel: send returns false when closed and full")
+{
+  dripcore::scheduler sched;
+  auto ch = std::make_shared<dripcore::channel<int>>(1);
+  std::atomic<bool> send_result = true;
+
+  class test_task : public dripcore::task {
+  public:
+    test_task(std::shared_ptr<dripcore::channel<int>> ch, std::atomic<bool>& result)
+      : ch_(ch), result_(result) {}
+
+    dripcore::awaitable<> body() override {
+      ch_->try_send(1); // Fill the buffer
+      ch_->close();
+      // Channel is closed and full; send should return false immediately
+      result_ = co_await ch_->send(this, 2);
+      co_return;
+    }
+
+  private:
+    std::shared_ptr<dripcore::channel<int>> ch_;
+    std::atomic<bool>& result_;
+  };
+
+  sched.spawn<test_task>(ch, send_result);
+  sched.run();
+
+  CHECK(send_result == false);
+}
+
+TEST_CASE("channel: send returns false when channel closed while suspended" * doctest::timeout(1))
+{
+  dripcore::scheduler sched;
+  auto ch = std::make_shared<dripcore::channel<int>>(1);
+  std::atomic<bool> send_result = true;
+
+  class producer : public dripcore::task {
+  public:
+    producer(std::shared_ptr<dripcore::channel<int>> ch, std::atomic<bool>& result)
+      : ch_(ch), result_(result) {}
+
+    dripcore::awaitable<> body() override {
+      ch_->try_send(1); // Fill the buffer
+      // This should suspend (buffer full, no consumer)
+      result_ = co_await ch_->send(this, 2);
+      co_return;
+    }
+
+  private:
+    std::shared_ptr<dripcore::channel<int>> ch_;
+    std::atomic<bool>& result_;
+  };
+
+  class closer : public dripcore::task {
+  public:
+    closer(std::shared_ptr<dripcore::channel<int>> ch) : ch_(ch) {}
+
+    dripcore::awaitable<> body() override {
+      co_await yield(); // Let producer fill and suspend
+      ch_->close();     // Wake the suspended sender
+      co_return;
+    }
+
+  private:
+    std::shared_ptr<dripcore::channel<int>> ch_;
+  };
+
+  sched.spawn<producer>(ch, send_result);
+  sched.spawn<closer>(ch);
+  sched.run();
+
+  CHECK(send_result == false);
+}
+
+TEST_CASE("channel: try_recv wakes a suspended sender" * doctest::timeout(1))
+{
+  dripcore::scheduler sched;
+  auto ch = std::make_shared<dripcore::channel<int>>(1);
+  std::atomic<bool> send_completed = false;
+  std::atomic<int> recv_value = -1;
+
+  class producer : public dripcore::task {
+  public:
+    producer(std::shared_ptr<dripcore::channel<int>> ch, std::atomic<bool>& done)
+      : ch_(ch), done_(done) {}
+
+    dripcore::awaitable<> body() override {
+      ch_->try_send(1); // Fill the buffer
+      // This should suspend (buffer full)
+      co_await ch_->send(this, 2);
+      done_ = true;
+      ch_->close();
+      co_return;
+    }
+
+  private:
+    std::shared_ptr<dripcore::channel<int>> ch_;
+    std::atomic<bool>& done_;
+  };
+
+  class consumer : public dripcore::task {
+  public:
+    consumer(std::shared_ptr<dripcore::channel<int>> ch, std::atomic<int>& recv)
+      : ch_(ch), recv_(recv) {}
+
+    dripcore::awaitable<> body() override {
+      co_await yield(); // Let producer fill and suspend
+      recv_ = ch_->try_recv().value_or(-1); // Pop 1, wake sender (pushes 2)
+      co_return;
+    }
+
+  private:
+    std::shared_ptr<dripcore::channel<int>> ch_;
+    std::atomic<int>& recv_;
+  };
+
+  sched.spawn<producer>(ch, send_completed);
+  sched.spawn<consumer>(ch, recv_value);
+  sched.run();
+
+  CHECK(recv_value == 1);
+  CHECK(send_completed == true);
+  CHECK(ch->size() == 1); // [2] left in buffer
+}
+
+TEST_CASE("channel: send task is cancelled via task_control"
+  * doctest::timeout(2)
+)
+{
+  dripcore::scheduler scheduler;
+  auto ch = std::make_shared<dripcore::channel<int>>(1);
+
+  std::atomic<bool> was_cancelled{false};
+  std::atomic<bool> send_completed{false};
+
+  class sender_task : public dripcore::task {
+  public:
+    sender_task(std::shared_ptr<dripcore::channel<int>> ch,
+                std::atomic<bool>& cancelled,
+                std::atomic<bool>& completed)
+      : ch_(ch), cancelled_(cancelled), completed_(completed) {}
+
+    dripcore::awaitable<> body() override {
+      try {
+        ch_->try_send(1); // Fill the buffer
+        co_await ch_->send(this, 2); // Will suspend (buffer full, no consumer)
+        completed_ = true;           // Must NOT be reached
+      } catch (const dripcore::cancelled&) {
+        cancelled_ = true;
+      }
+      co_return;
+    }
+
+  private:
+    std::shared_ptr<dripcore::channel<int>> ch_;
+    std::atomic<bool>& cancelled_;
+    std::atomic<bool>& completed_;
+  };
+
+  class canceller_task : public dripcore::task {
+  public:
+    canceller_task(std::shared_ptr<dripcore::channel<int>> ch,
+                   std::atomic<bool>& cancelled,
+                   std::atomic<bool>& completed)
+      : ch_(ch), cancelled_(cancelled), completed_(completed) {}
+
+    dripcore::awaitable<> body() override {
+      auto sender = spawn<sender_task>(ch_, cancelled_, completed_);
+      co_await sleep_for(std::chrono::milliseconds(10)); // Let sender suspend
+      sender.cancel();
+      co_return;
+    }
+
+  private:
+    std::shared_ptr<dripcore::channel<int>> ch_;
+    std::atomic<bool>& cancelled_;
+    std::atomic<bool>& completed_;
+  };
+
+  scheduler.spawn<canceller_task>(ch, was_cancelled, send_completed);
+  scheduler.run();
+
+  CHECK(was_cancelled == true);
+  CHECK(send_completed == false);
+}
