@@ -440,7 +440,7 @@ protected:
 
     dripcore::awaitable<> body() override
     {
-      auto target = spawn<TaskType>(fd_, cancelled_, completed_);
+      auto target = spawn_local<TaskType>(fd_, cancelled_, completed_);
       co_await sleep_for(std::chrono::milliseconds(10));
       target.cancel();
       co_return;
@@ -762,7 +762,7 @@ protected:
 
     dripcore::awaitable<> body() override
     {
-      auto target = spawn<TargetTask>(fd_, cancelled_, completed_);
+      auto target = spawn_local<TargetTask>(fd_, cancelled_, completed_);
       co_await sleep_for(std::chrono::milliseconds(10));
       co_await target.stop();
       resumed_ = true;
@@ -916,7 +916,7 @@ TEST_CASE("task_control: stop() on already-done task returns immediately"
 
     dripcore::awaitable<> body() override
     {
-      auto target = spawn<quick_task>(ran_);
+      auto target = spawn_local<quick_task>(ran_);
       co_await sleep_for(std::chrono::milliseconds(50));
       CHECK(target.done() == true);
       co_await target.stop();
@@ -1114,7 +1114,7 @@ TEST_CASE("task_control: stop() on failing task propagates exception"
       : resumed_(resumed), target_(target) {}
     dripcore::awaitable<> body() override
     {
-      auto child = spawn<failing_task>(started_);
+      auto child = spawn_local<failing_task>(started_);
       co_await sleep_for(std::chrono::milliseconds(50));
       CHECK(child.done() == true);
       CHECK(child.cancelled() == false);

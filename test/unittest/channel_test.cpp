@@ -482,7 +482,7 @@ TEST_CASE("channel: recv task is cancelled via task_control"
 
     dripcore::awaitable<> body() override
     {
-      auto receiver = spawn<receiver_task>(ch_, cancelled_, completed_);
+      auto receiver = spawn_local<receiver_task>(ch_, cancelled_, completed_);
       co_await sleep_for(std::chrono::milliseconds(10)); // Let receiver suspend
       receiver.cancel();
       co_return;
@@ -818,7 +818,7 @@ TEST_CASE("channel: send task is cancelled via task_control"
       : ch_(ch), cancelled_(cancelled), completed_(completed) {}
 
     dripcore::awaitable<> body() override {
-      auto sender = spawn<sender_task>(ch_, cancelled_, completed_);
+      auto sender = spawn_local<sender_task>(ch_, cancelled_, completed_);
       co_await sleep_for(std::chrono::milliseconds(10)); // Let sender suspend
       sender.cancel();
       co_return;

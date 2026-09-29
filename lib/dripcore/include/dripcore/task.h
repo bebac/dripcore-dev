@@ -48,8 +48,26 @@ namespace dripcore
       if (ep) std::rethrow_exception(ep);
     }
 
+    // Spawn a child task pinned to the current executor for its whole
+    // lifetime. Use this when the child shares mutable state (sockets,
+    // buffers, channels) with its spawner or siblings. This is the
+    // right default for most nested spawns.
     template <typename T, typename... Args>
-    task_control spawn(Args &&...args)
+    task_control spawn_local(Args &&...args)
+    {
+      return executor::current()->spawn<T>(std::forward<Args>(args)...);
+    }
+
+    // Spawn a child task with no affinity to the current executor. With a
+    // single executor this is identical to spawn_local(); once the
+    // scheduler owns multiple executors, placement is decided by the
+    // scheduler's distribution policy. Use this for independent units of
+    // work (e.g. per-connection handlers) that share no mutable state
+    // with their spawner. See
+    // doc/multithreading_readiness_review.md "Task and Channel Locality
+    // API Design".
+    template <typename T, typename... Args>
+    task_control spawn_distributed(Args &&...args)
     {
       return executor::current()->spawn<T>(std::forward<Args>(args)...);
     }

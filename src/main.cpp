@@ -160,8 +160,10 @@ public:
 
       client.nonblocking(true);
 
-      // Spawn connection handler using task::spawn()
-      spawn<echo_connection>(std::move(client));
+      // Spawn connection handler using task::spawn_distributed() -- an
+      // accepted connection is independent of the listener and every
+      // other connection.
+      spawn_distributed<echo_connection>(std::move(client));
 
       std::cout << "client connected " << client_address << std::endl;
     }
