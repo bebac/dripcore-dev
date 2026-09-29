@@ -55,6 +55,9 @@ if(BUILD_BENCHMARKS)
     add_subdirectory(test/benchmark)
 endif()
 
+# Examples
+add_subdirectory(examples)
+
 if(ENABLE_ASAN)
     add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address)
