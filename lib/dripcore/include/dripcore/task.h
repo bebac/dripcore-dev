@@ -3,6 +3,7 @@
 
 #include <dripcore/executor.h>
 #include <dripcore/awaitable.h>
+#include <dripcore/blocking_awaiter.h>
 #include <dripcore/sleep_awaiter.h>
 #include <dripcore/task_control_block.h>
 #include <dripcore/cancelled.h>
@@ -94,6 +95,26 @@ namespace dripcore
         control_block_.get(),
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(duration)
       };
+    }
+
+    // Run a blocking callable on the executor's blocking pool and resume
+    // this task with its result (or its exception). Cancellation and
+    // deadlines abandon the worker job: the blocking call is never
+    // interrupted, but the awaiting frame resumes immediately (throwing
+    // dripcore::cancelled). See doc/blocking_offload_proposal.md.
+    template <typename F>
+    auto run_blocking(F&& f)
+    {
+      return blocking_awaiter<std::decay_t<F>>{
+        executor::current(), control_block_.get(), std::forward<F>(f)};
+    }
+
+    template <typename F, typename Rep, typename Period>
+    auto run_blocking(F&& f, std::chrono::duration<Rep, Period> timeout)
+    {
+      return blocking_awaiter<std::decay_t<F>>{
+        executor::current(), control_block_.get(), std::forward<F>(f),
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(timeout)};
     }
 
     // Raw file descriptor overload

@@ -1,4 +1,6 @@
 #include <dripcore/executor.h>
+#include <dripcore/blocking_awaiter.h>
+#include <dripcore/blocking_pool.h>
 #include <dripcore/io_awaiter.h>
 #include <dripcore/sleep_awaiter.h>
 #include <system_error>
@@ -80,6 +82,106 @@ namespace dripcore
     }
   }
 
+  // ---- Blocking offload (see doc/blocking_offload_proposal.md) ----
+
+  void executor::resume_external(std::coroutine_handle<> h)
+  {
+    {
+      std::lock_guard<std::mutex> lock(external_mutex_);
+      external_queue_.push_back(h);
+    }
+    event_loop_->trigger_wake_notification();
+  }
+
+  void executor::drain_external()
+  {
+    // Move handles enqueued by worker threads onto the ready queue.
+    // Runs on the executor thread at the top of the run loop.
+    std::deque<std::coroutine_handle<>> local;
+    {
+      std::lock_guard<std::mutex> lock(external_mutex_);
+      local.swap(external_queue_);
+    }
+    for (auto h : local)
+    {
+      if (h && !h.done())
+      {
+        ready_task(h);
+      }
+    }
+  }
+
+  blocking_pool& executor::get_blocking_pool()
+  {
+    if (!blocking_pool_)
+    {
+      blocking_pool_ = std::make_unique<blocking_pool>();
+    }
+    return *blocking_pool_;
+  }
+
+  void executor::register_blocking(blocking_awaiter_base* a)
+  {
+    a->prev_ = nullptr;
+    a->next_ = blocking_head_;
+    if (blocking_head_)
+    {
+      blocking_head_->prev_ = a;
+    }
+    blocking_head_ = a;
+    a->linked_ = true;
+  }
+
+  bool executor::unlink_blocking(blocking_awaiter_base* a)
+  {
+    if (!a->linked_)
+    {
+      return false;
+    }
+    if (a->prev_)
+    {
+      a->prev_->next_ = a->next_;
+    }
+    else
+    {
+      blocking_head_ = a->next_;
+    }
+    if (a->next_)
+    {
+      a->next_->prev_ = a->prev_;
+    }
+    a->prev_ = a->next_ = nullptr;
+    a->linked_ = false;
+    return true;
+  }
+
+  void executor::deregister_blocking(blocking_awaiter_base* a)
+  {
+    unlink_blocking(a);
+  }
+
+  void executor::register_deadline(std::chrono::steady_clock::time_point wake_time,
+                                   void (*expire)(void*), void* ptr)
+  {
+    timer_entry entry{wake_time, {}, nullptr, expire, ptr};
+    timer_queue_.insert(entry);
+
+    // Wake up the event loop so it can recalculate the poll timeout
+    event_loop_->trigger_wake_notification();
+  }
+
+  void executor::deregister_deadline(void* ptr)
+  {
+    for (auto it = timer_queue_.begin(); it != timer_queue_.end(); ++it)
+    {
+      if (it->expire_func && it->expire_ptr == ptr)
+      {
+        timer_queue_.erase(it);
+        break;
+      }
+    }
+  }
+
   void executor::on_io_event(io_awaiter* a)
   {
     // A readiness event was delivered. The backend disarmed this registration
@@ -112,13 +214,32 @@ namespace dripcore
       ++count;
     }
 
-    // Cancel all pending timers (sleepers).
+    // Cancel all pending blocking offloads: mark the task cancelled and
+    // claim the shared state so a concurrently completing worker cannot
+    // also resume the frame. The resumed frame throws dripcore::cancelled
+    // from blocking_awaiter::await_resume; the worker thread finishes its
+    // syscall and discards the result.
+    while (blocking_head_) {
+      blocking_awaiter_base* a = blocking_head_;
+      a->cancel();
+      unlink_blocking(a);  // cancel() does not unlink; advance the list
+      ++count;
+    }
+
+    // Cancel all pending timers (sleepers). Deadline entries route
+    // through their expiry hook so the single-resume claim stays in one
+    // place; their blocking awaiter was normally already cancelled (and
+    // the claim lost) by the blocking walk above.
     for (auto it = timer_queue_.begin(); it != timer_queue_.end(); ++it) {
-      if (it->awaiter) {
-        it->awaiter->cancel();
-      }
-      if (it->handle && !it->handle.done()) {
-        ready_task(it->handle);
+      if (it->expire_func) {
+        it->expire_func(it->expire_ptr);
+      } else {
+        if (it->awaiter) {
+          it->awaiter->cancel();
+        }
+        if (it->handle && !it->handle.done()) {
+          ready_task(it->handle);
+        }
       }
       ++count;
     }
@@ -190,9 +311,15 @@ namespace dripcore
         break; // No more expired timers
       }
 
-      // Resume the coroutine
-      if (it->handle && !it->handle.done())
+      if (it->expire_func)
       {
+        // Deadline entry: invoke the expiry hook instead of resuming;
+        // the hook owns the single-resume claim.
+        it->expire_func(it->expire_ptr);
+      }
+      else if (it->handle && !it->handle.done())
+      {
+        // Resume the coroutine
         ready_task(it->handle);
       }
 
@@ -275,6 +402,8 @@ namespace dripcore
         tasks_.clear();
         break;
       }
+
+      drain_external();  // handles resumed from blocking-pool workers
 
       bool had_ready_tasks = process_ready_tasks();
 

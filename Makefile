@@ -37,6 +37,14 @@ asan:
 	@cmake --build build_asan -j8
 	@build_asan/test/unittest/unittest
 
+# Build and test with ThreadSanitizer
+tsan:
+	@echo "Building with ThreadSanitizer..."
+	@mkdir -p build_tsan
+	@cmake -S $(CMAKE_SOURCE_DIR) -B build_tsan -DBUILD_TESTING=ON -DBUILD_BENCHMARKS=ON -DENABLE_TSAN=ON
+	@cmake --build build_tsan -j8
+	@build_tsan/test/unittest/unittest
+
 # Add the sentinel file to the list of PHONY targets if you might want to call it directly
-.PHONY: build clean rebld all unittest asan
+.PHONY: build clean rebld all unittest asan tsan
 

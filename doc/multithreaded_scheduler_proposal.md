@@ -31,6 +31,13 @@ This document proposes a redesign of DripCore's scheduler to support multi-core 
 - **Service Abstraction**: Long-running supervised components
 - **Global Queue**: For overflow and external spawns
 
+> A scoped-down slice of "Cross-Thread Submission" — resuming a single
+> coroutine handle from a worker thread, plus a blocking-offload awaitable
+> (`run_blocking`) — is proposed separately in
+> `doc/blocking_offload_proposal.md`. It requires no multiple executors or
+> work stealing, is forward-compatible with this proposal, and does not
+> advance the Phase 3 critical path.
+
 The current single-threaded scheduler is well-designed for I/O multiplexing but cannot leverage multiple CPU cores or elegantly express long-running services alongside short-lived tasks.
 
 ## Current Architecture Analysis

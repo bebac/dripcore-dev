@@ -23,6 +23,7 @@ add_library(dripcore STATIC
     lib/dripcore/source/io_awaiter.cpp
     lib/dripcore/source/socket.cpp
     lib/dripcore/source/sleep_awaiter.cpp
+    lib/dripcore/source/blocking_pool.cpp
     lib/dripcore/source/task_control.cpp
     ${EVENT_LOOP_SOURCE}
 )
@@ -45,6 +46,7 @@ set_target_properties(dripcore PROPERTIES
 option(BUILD_TESTING "Build the testing suite" OFF)
 option(BUILD_BENCHMARKS "Build the benchmark suite" OFF)
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 
 if(BUILD_TESTING)
     enable_testing()
@@ -61,6 +63,11 @@ add_subdirectory(examples)
 if(ENABLE_ASAN)
     add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address)
+endif()
+
+if(ENABLE_TSAN)
+    add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=thread)
 endif()
 
 # Main application
