@@ -23,14 +23,21 @@ namespace dripcore
 
   void event_loop_kqueue::register_event(int fd, short events, void* udata)
   {
+    // knotes are keyed by (fd, filter), so a second waiter on the same fd and
+    // direction silently replaces the first one's udata. event_loop's contract
+    // allows at most one waiter per (fd, direction); unlike the epoll backend
+    // this one has no registry and so cannot detect a violation.
     struct kevent kev;
     int filter = (events & POLLIN) ? EVFILT_READ : EVFILT_WRITE;
     EV_SET(&kev, fd, filter, EV_ADD | EV_ONESHOT, 0, 0, udata);
     kevent(kqueue_fd_, &kev, 1, nullptr, 0, nullptr);
   }
 
-  void event_loop_kqueue::deregister_event(int fd, short events)
+  void event_loop_kqueue::deregister_event(int fd, short events, void* /*udata*/)
   {
+    // kqueue knotes are keyed by (fd, filter), so the waiter is implied by
+    // fd+events and the udata is not needed here; readable and writable
+    // waits on the same fd are separate knotes and do not interfere.
     struct kevent kev;
     int filter = (events & POLLIN) ? EVFILT_READ : EVFILT_WRITE;
     EV_SET(&kev, fd, filter, EV_DELETE, 0, 0, nullptr);

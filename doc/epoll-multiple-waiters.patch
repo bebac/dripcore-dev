@@ -1,0 +1,583 @@
+diff --git a/lib/dripcore/include/dripcore/event_loop.h b/lib/dripcore/include/dripcore/event_loop.h
+index 10b5e67..827d866 100644
+--- a/lib/dripcore/include/dripcore/event_loop.h
++++ b/lib/dripcore/include/dripcore/event_loop.h
+@@ -16,12 +16,19 @@ namespace dripcore
+     // udata is an opaque pointer handed back via poll()'s callback when the
+     // event fires. dripcore passes the io_awaiter* so the executor can locate
+     // its registry entry and enforce the once-only resume guard.
++    // Multiple waiters may be registered on the same fd with different event
++    // masks (e.g. one task co_await readable(fd) while another co_await
++    // writable(fd)); a fired event must be fanned out to every waiter whose
++    // mask matches. kqueue gets this for free because knotes are keyed by
++    // (fd, filter); epoll is fd-level, so the epoll backend multiplexes
++    // waiters per fd internally.
+     virtual void register_event(int fd, short events, void* udata) = 0;
+ 
+-    // Remove a previously registered I/O event (EV_DELETE / EPOLL_CTL_DEL).
+-    // Must be safe to call even if the event already fired (ONESHOT) or was
+-    // never armed; implementations ignore "not found" errors.
+-    virtual void deregister_event(int fd, short events) = 0;
++    // Remove a previously registered waiter, identified by (fd, udata)
++    // (kqueue EV_DELETE / epoll EPOLL_CTL_DEL). Must be safe to call even if
++    // the event already fired (ONESHOT) or was never armed; implementations
++    // ignore "not found" errors.
++    virtual void deregister_event(int fd, short events, void* udata) = 0;
+ 
+     // Poll for I/O events and invoke callbacks for ready events
+     // timeout_ms: maximum time to wait in milliseconds (0 = non-blocking, -1 = infinite)
+diff --git a/lib/dripcore/include/dripcore/event_loop_epoll.h b/lib/dripcore/include/dripcore/event_loop_epoll.h
+index a0aaf7f..de5e3c5 100644
+--- a/lib/dripcore/include/dripcore/event_loop_epoll.h
++++ b/lib/dripcore/include/dripcore/event_loop_epoll.h
+@@ -3,9 +3,19 @@
+ 
+ #include <dripcore/event_loop.h>
+ 
++#include <cstdint>
++#include <unordered_map>
++#include <vector>
++
+ namespace dripcore
+ {
+-  // Linux implementation using epoll
++  // Linux implementation using epoll.
++  //
++  // epoll keeps a single interest-list entry per fd, so multiple waiters on
++  // the same fd cannot each get their own epoll registration. This backend
++  // multiplexes waiters per fd and arms epoll with the union of their event
++  // masks. Read and write waiters are kept separately so dispatch can move a
++  // fired list aside without allocating or partitioning a combined list.
+   class event_loop_epoll : public event_loop
+   {
+   public:
+@@ -13,14 +23,30 @@ namespace dripcore
+     ~event_loop_epoll() override;
+ 
+     void register_event(int fd, short events, void* udata) override;
+-    void deregister_event(int fd, short events) override;
++    void deregister_event(int fd, short events, void* udata) override;
+     int poll(int timeout_ms, std::function<void(void *)> resume_callback) override;
+     void setup_wake_notification() override;
+     void trigger_wake_notification() override;
+ 
+   private:
++    struct fd_entry
++    {
++      std::uint32_t generation = 0;
++      std::vector<void*> read_waiters;
++      std::vector<void*> write_waiters;
++    };
++
++    static std::uint32_t interest_mask(const fd_entry& entry);
++    static std::uint64_t event_token(int fd, std::uint32_t generation);
++
++    // Arm or re-arm an fd with EPOLLONESHOT. New entries use ADD, with a MOD
++    // fallback for a kernel entry left over from an earlier registration.
++    void arm_fd(int fd, const fd_entry& entry, bool add);
++
+     int epoll_fd_ = -1;
+     int wake_event_fd_ = -1; // eventfd for wake notifications
++    std::unordered_map<int, fd_entry> entries_;
++    std::uint32_t next_generation_ = 0;
+   };
+ }
+ 
+diff --git a/lib/dripcore/include/dripcore/event_loop_kqueue.h b/lib/dripcore/include/dripcore/event_loop_kqueue.h
+index 29bc998..bd66232 100644
+--- a/lib/dripcore/include/dripcore/event_loop_kqueue.h
++++ b/lib/dripcore/include/dripcore/event_loop_kqueue.h
+@@ -13,7 +13,7 @@ namespace dripcore
+     ~event_loop_kqueue() override;
+ 
+     void register_event(int fd, short events, void* udata) override;
+-    void deregister_event(int fd, short events) override;
++    void deregister_event(int fd, short events, void* udata) override;
+     int poll(int timeout_ms, std::function<void(void *)> resume_callback) override;
+     void setup_wake_notification() override;
+     void trigger_wake_notification() override;
+diff --git a/lib/dripcore/source/event_loop_epoll.cpp b/lib/dripcore/source/event_loop_epoll.cpp
+index 1a8d89b..c5ba2b1 100644
+--- a/lib/dripcore/source/event_loop_epoll.cpp
++++ b/lib/dripcore/source/event_loop_epoll.cpp
+@@ -3,10 +3,19 @@
+ #include <sys/eventfd.h>
+ #include <unistd.h>
+ #include <poll.h>
++#include <algorithm>
+ #include <system_error>
+ 
+ namespace dripcore
+ {
++  namespace
++  {
++    // Sentinel stored in epoll_event::data.u64 for the wake eventfd. Normal
++    // I/O events encode an fd and generation, and valid fds are non-negative,
++    // so this value cannot collide with an I/O token.
++    constexpr std::uint64_t wake_sentinel = ~std::uint64_t{0};
++  }
++
+   event_loop_epoll::event_loop_epoll()
+   {
+     epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
+@@ -25,29 +34,91 @@ namespace dripcore
+     }
+   }
+ 
+-  void event_loop_epoll::register_event(int fd, short events, void* udata)
++  std::uint32_t event_loop_epoll::interest_mask(const fd_entry& entry)
++  {
++    std::uint32_t mask = 0;
++    if (!entry.read_waiters.empty()) mask |= EPOLLIN;
++    if (!entry.write_waiters.empty()) mask |= EPOLLOUT;
++    return mask;
++  }
++
++  std::uint64_t event_loop_epoll::event_token(int fd, std::uint32_t generation)
++  {
++    return (static_cast<std::uint64_t>(generation) << 32)
++      | static_cast<std::uint32_t>(fd);
++  }
++
++  void event_loop_epoll::arm_fd(int fd, const fd_entry& entry, bool add)
+   {
+-    struct epoll_event ev;
++    struct epoll_event ev{};
+ 
+-    ev.events = ((events & POLLIN) ? EPOLLIN : EPOLLOUT) | EPOLLONESHOT;
+-    ev.data.ptr = udata;
++    ev.events = interest_mask(entry) | EPOLLONESHOT;
++    ev.data.u64 = event_token(fd, entry.generation);
+ 
+-    // EEXIST can occur because EPOLLONESHOT only *disables* a fired entry
+-    // (it stays in the interest set); re-arming it is a MOD, not an ADD.
+-    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) == -1) {
+-      if (errno == EEXIST) {
+-        epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev);
++    if (epoll_ctl(epoll_fd_, add ? EPOLL_CTL_ADD : EPOLL_CTL_MOD, fd, &ev) == -1) {
++      // EPOLLONESHOT disables a fired entry but leaves it in the interest
++      // set, so an ADD for a replacement entry can still require a MOD.
++      if (add && errno == EEXIST) {
++        (void)epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev);
+       }
+     }
+   }
+ 
+-  void event_loop_epoll::deregister_event(int fd, short /*events*/)
++  void event_loop_epoll::register_event(int fd, short events, void* udata)
++  {
++    auto [it, inserted] = entries_.try_emplace(fd);
++    auto& entry = it->second;
++    if (inserted) {
++      entry.generation = ++next_generation_;
++    }
++
++    // Guard against double registration of the same waiter token.
++    if (std::find(entry.read_waiters.begin(), entry.read_waiters.end(), udata)
++          != entry.read_waiters.end()
++        || std::find(entry.write_waiters.begin(), entry.write_waiters.end(), udata)
++          != entry.write_waiters.end()) {
++      return;
++    }
++
++    auto& waiters = (events & POLLIN) ? entry.read_waiters : entry.write_waiters;
++    const bool interest_changed = waiters.empty();
++    waiters.push_back(udata);
++
++    // Adding a waiter to an already-armed direction does not change the
++    // kernel interest mask and needs no epoll_ctl call.
++    if (inserted || interest_changed) {
++      arm_fd(fd, entry, inserted);
++    }
++  }
++
++  void event_loop_epoll::deregister_event(int fd, short events, void* udata)
+   {
+-    // Unlike kqueue's EV_ONESHOT (which removes the knote on delivery),
+-    // EPOLLONESHOT only disables the fd, so an explicit DEL is required to
+-    // fully deregister. Safe to call if the fd is absent (ENOENT ignored);
+-    // epoll is fd-level so the events mask is not needed here.
+-    (void)epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
++    auto it = entries_.find(fd);
++    if (it == entries_.end()) {
++      return;
++    }
++
++    auto& entry = it->second;
++    auto& waiters = (events & POLLIN) ? entry.read_waiters : entry.write_waiters;
++    auto waiter_it = std::find(waiters.begin(), waiters.end(), udata);
++    if (waiter_it == waiters.end()) {
++      return;
++    }
++    waiters.erase(waiter_it);
++
++    // Other waiters still need exactly the same kernel interest mask.
++    if (!waiters.empty()) {
++      return;
++    }
++
++    if (entry.read_waiters.empty() && entry.write_waiters.empty()) {
++      (void)epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
++      entries_.erase(it);
++    } else {
++      // Remove the empty direction from the union. MOD also re-arms the fd
++      // if its previous EPOLLONESHOT event has already been delivered.
++      arm_fd(fd, entry, false);
++    }
+   }
+ 
+   int event_loop_epoll::poll(int timeout_ms, std::function<void(void*)> resume_callback)
+@@ -59,15 +130,59 @@ namespace dripcore
+ 
+     for (int i = 0; i < n; i++)
+     {
+-      // Skip wake event fd - it's just for notification
+-      if (evs[i].data.fd == wake_event_fd_)
++      // Skip wake event fd - it's just for notification.
++      if (evs[i].data.u64 == wake_sentinel)
+       {
+-        // Consume the eventfd value to reset it
++        // Consume the eventfd value to reset it.
+         uint64_t val;
+         [[maybe_unused]] auto res = read(wake_event_fd_, &val, sizeof(val));
+         continue;
+       }
+-      resume_callback(evs[i].data.ptr);
++
++      const auto token = evs[i].data.u64;
++      const auto fd = static_cast<int>(static_cast<std::uint32_t>(token));
++      const auto generation = static_cast<std::uint32_t>(token >> 32);
++      auto it = entries_.find(fd);
++
++      // A callback earlier in this batch may have deregistered this fd, or
++      // replaced it with a new registration. Never dereference a stale entry
++      // pointer or deliver an old event to the replacement waiters.
++      if (it == entries_.end() || it->second.generation != generation) {
++        continue;
++      }
++
++      auto& entry = it->second;
++      const std::uint32_t fired = evs[i].events;
++      const bool wake_all = fired & (EPOLLERR | EPOLLHUP);
++      std::vector<void*> fired_readers;
++      std::vector<void*> fired_writers;
++
++      // Swap whole lists into batch-local storage. This removes fired
++      // waiters before callbacks and requires no allocation or per-waiter
++      // partitioning. Non-matching waiters stay registered in entry.
++      if (wake_all || (fired & EPOLLIN)) {
++        fired_readers.swap(entry.read_waiters);
++      }
++      if (wake_all || (fired & EPOLLOUT)) {
++        fired_writers.swap(entry.write_waiters);
++      }
++
++      // Re-arm remaining waiters before invoking callbacks. A resumed task
++      // may immediately re-await the same fd, and that registration must not
++      // be clobbered by a later re-arm.
++      if (entry.read_waiters.empty() && entry.write_waiters.empty()) {
++        (void)epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
++        entries_.erase(it);
++      } else {
++        arm_fd(fd, entry, false);
++      }
++
++      for (void* waiter : fired_readers) {
++        resume_callback(waiter);
++      }
++      for (void* waiter : fired_writers) {
++        resume_callback(waiter);
++      }
+     }
+ 
+     return n;
+@@ -75,16 +190,15 @@ namespace dripcore
+ 
+   void event_loop_epoll::setup_wake_notification()
+   {
+-    // Create an eventfd for wake notifications
++    // Create the eventfd for wake notifications.
+     wake_event_fd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+     if (wake_event_fd_ < 0) {
+       throw std::system_error(errno, std::system_category(), "eventfd creation failed");
+     }
+ 
+-    // Register the eventfd with epoll
+-    struct epoll_event ev;
++    struct epoll_event ev{};
+     ev.events = EPOLLIN;
+-    ev.data.fd = wake_event_fd_;  // Store fd so we can identify it
++    ev.data.u64 = wake_sentinel;
+     if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wake_event_fd_, &ev) == -1) {
+       throw std::system_error(errno, std::system_category(), "epoll_ctl for eventfd failed");
+     }
+@@ -92,13 +206,13 @@ namespace dripcore
+ 
+   void event_loop_epoll::trigger_wake_notification()
+   {
+-    // Write to eventfd to wake up epoll_wait
++    // Write to eventfd to wake up epoll_wait.
+     uint64_t val = 1;
+-    // Ignore write errors (EAGAIN is fine, means it's already triggered)
++    // Ignore write errors (EAGAIN is fine, means it's already triggered).
+     [[maybe_unused]] auto res = write(wake_event_fd_, &val, sizeof(val));
+   }
+ 
+-  // Factory function implementation for Linux
++  // Factory function implementation for Linux.
+   event_loop* create_event_loop()
+   {
+     return new event_loop_epoll();
+diff --git a/lib/dripcore/source/event_loop_kqueue.cpp b/lib/dripcore/source/event_loop_kqueue.cpp
+index b1c2138..eeca08d 100644
+--- a/lib/dripcore/source/event_loop_kqueue.cpp
++++ b/lib/dripcore/source/event_loop_kqueue.cpp
+@@ -29,8 +29,11 @@ namespace dripcore
+     kevent(kqueue_fd_, &kev, 1, nullptr, 0, nullptr);
+   }
+ 
+-  void event_loop_kqueue::deregister_event(int fd, short events)
++  void event_loop_kqueue::deregister_event(int fd, short events, void* /*udata*/)
+   {
++    // kqueue knotes are keyed by (fd, filter), so the waiter is implied by
++    // fd+events and the udata is not needed here; readable and writable
++    // waits on the same fd are separate knotes and do not interfere.
+     struct kevent kev;
+     int filter = (events & POLLIN) ? EVFILT_READ : EVFILT_WRITE;
+     EV_SET(&kev, fd, filter, EV_DELETE, 0, 0, nullptr);
+diff --git a/lib/dripcore/source/executor.cpp b/lib/dripcore/source/executor.cpp
+index 134307e..5ae86d3 100644
+--- a/lib/dripcore/source/executor.cpp
++++ b/lib/dripcore/source/executor.cpp
+@@ -78,7 +78,7 @@ namespace dripcore
+     // Called from ~io_awaiter. If still armed, remove the registration from the
+     // event loop (kqueue EV_DELETE / epoll EPOLL_CTL_DEL).
+     if (unlink_io(a)) {
+-      event_loop_->deregister_event(a->fd_, a->events_);
++      event_loop_->deregister_event(a->fd_, a->events_, a);
+     }
+   }
+ 
+@@ -184,11 +184,12 @@ namespace dripcore
+ 
+   void executor::on_io_event(io_awaiter* a)
+   {
+-    // A readiness event was delivered. The backend disarmed this registration
+-    // on delivery (kqueue EV_ONESHOT removes it; epoll EPOLLONESHOT disables
+-    // it), so it will not fire again until re-armed. Once-only guard: only
+-    // resume if still linked, so a concurrent cancel in the same poll batch
+-    // cannot cause a double resume.
++    // A readiness event was delivered for this waiter. The backend removed
++    // the waiter from its registration on delivery (kqueue EV_ONESHOT removes
++    // the knote; the epoll backend removes the waiter from the fd's fan-out
++    // list and re-arms the remaining waiters), so it will not fire again
++    // until re-armed. Once-only guard: only resume if still linked, so a
++    // concurrent cancel in the same poll batch cannot cause a double resume.
+     if (unlink_io(a)) {
+       if (a->control_block_) {
+         resume(a->control_block_->handle_);
+@@ -207,7 +208,7 @@ namespace dripcore
+       io_awaiter* a = io_head_;
+       a->cancel();
+       unlink_io(a);                                     // advances io_head_
+-      event_loop_->deregister_event(a->fd_, a->events_);
++      event_loop_->deregister_event(a->fd_, a->events_, a);
+       if (a->control_block_) {
+         ready_task(a->control_block_);
+       }
+diff --git a/test/unittest/event_loop_epoll_test.cpp b/test/unittest/event_loop_epoll_test.cpp
+new file mode 100644
+index 0000000..9981adf
+--- /dev/null
++++ b/test/unittest/event_loop_epoll_test.cpp
+@@ -0,0 +1,91 @@
++#include <doctest/doctest.h>
++
++#ifdef __linux__
++
++#include <dripcore/event_loop_epoll.h>
++
++#include <poll.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <vector>
++
++TEST_CASE("epoll: fans readiness out to multiple readers on the same fd"
++  * doctest::timeout(5))
++{
++  int sv[2];
++  REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
++
++  dripcore::event_loop_epoll event_loop;
++  int reader_1;
++  int reader_2;
++  std::vector<void*> resumed;
++
++  event_loop.register_event(sv[0], POLLIN, &reader_1);
++  event_loop.register_event(sv[0], POLLIN, &reader_2);
++  REQUIRE(write(sv[1], "x", 1) == 1);
++
++  event_loop.poll(100, [&resumed](void* waiter) {
++    resumed.push_back(waiter);
++  });
++
++  CHECK(resumed.size() == 2);
++  CHECK(std::find(resumed.begin(), resumed.end(), &reader_1) != resumed.end());
++  CHECK(std::find(resumed.begin(), resumed.end(), &reader_2) != resumed.end());
++
++  close(sv[0]);
++  close(sv[1]);
++}
++
++TEST_CASE("epoll: stale batch event does not reach a replacement registration"
++  * doctest::timeout(5))
++{
++  int sv_1[2];
++  int sv_2[2];
++  REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, sv_1) == 0);
++  REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, sv_2) == 0);
++
++  dripcore::event_loop_epoll event_loop;
++  int waiter_1;
++  int waiter_2;
++  int replacement;
++  int callbacks = 0;
++
++  event_loop.register_event(sv_1[0], POLLIN, &waiter_1);
++  event_loop.register_event(sv_2[0], POLLIN, &waiter_2);
++  REQUIRE(write(sv_1[1], "x", 1) == 1);
++  REQUIRE(write(sv_2[1], "x", 1) == 1);
++
++  // Whichever fd is delivered first, replace the other registration. The
++  // other old event is already in this epoll_wait batch and must be ignored,
++  // even though the fd number is now present in entries_ again.
++  event_loop.poll(100, [&](void* waiter) {
++    ++callbacks;
++    if (waiter == &waiter_1) {
++      event_loop.deregister_event(sv_2[0], POLLIN, &waiter_2);
++      event_loop.register_event(sv_2[0], POLLIN, &replacement);
++    } else {
++      CHECK(waiter == &waiter_2);
++      event_loop.deregister_event(sv_1[0], POLLIN, &waiter_1);
++      event_loop.register_event(sv_1[0], POLLIN, &replacement);
++    }
++  });
++
++  CHECK(callbacks == 1);
++
++  // The replacement is still armed and receives a fresh event on the next
++  // poll, proving that rejecting the stale event did not disarm it.
++  event_loop.poll(100, [&](void* waiter) {
++    CHECK(waiter == &replacement);
++    ++callbacks;
++  });
++  CHECK(callbacks == 2);
++
++  close(sv_1[0]);
++  close(sv_1[1]);
++  close(sv_2[0]);
++  close(sv_2[1]);
++}
++
++#endif
+diff --git a/test/unittest/scheduler_test.cpp b/test/unittest/scheduler_test.cpp
+index 817eee7..781a100 100644
+--- a/test/unittest/scheduler_test.cpp
++++ b/test/unittest/scheduler_test.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include <unistd.h>
+ #include <fcntl.h>
++#include <sys/socket.h>
+ 
+ #include <atomic>
+ #include <cstdio>
+@@ -1140,4 +1141,85 @@ TEST_CASE("task_control: stop() on failing task propagates exception"
+   scheduler.run();
+ 
+   CHECK(stopper_resumed == true);
++}
++
++// ---------------------------------------------------------------------------
++// Regression test: two tasks suspended on the SAME fd with different event
++// masks (one readable, one writable). epoll keeps a single interest entry
++// per fd, so the epoll backend must fan events out to all waiters on the fd;
++// before that fix, the second registration clobbered the first (EEXIST ->
++// EPOLL_CTL_MOD) and the readable waiter could hang forever. kqueue handles
++// this natively because knotes are keyed by (fd, filter).
++// ---------------------------------------------------------------------------
++
++TEST_CASE("scheduler: readable and writable waits on the same fd from two tasks"
++  * doctest::timeout(5))
++{
++  int sv[2];
++  REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
++  fcntl(sv[0], F_SETFL, O_NONBLOCK);
++
++  dripcore::scheduler scheduler;
++  std::atomic<bool> reader_done{false};
++  std::atomic<bool> writer_done{false};
++
++  // Reader task - waits for the fd to become readable
++  class reader_task : public dripcore::task
++  {
++  public:
++    reader_task(int fd, std::atomic<bool>& done) : fd_(fd), done_(done) {}
++
++    dripcore::awaitable<> body() override
++    {
++      co_await readable(fd_);
++
++      char buf[16];
++      ssize_t n = read(fd_, buf, sizeof(buf));
++      CHECK(n > 0);
++
++      done_ = true;
++      co_return;
++    }
++
++  private:
++    int fd_;
++    std::atomic<bool>& done_;
++  };
++
++  // Writer task - waits for the SAME fd to become writable, then writes to
++  // the peer end so that sv[0] becomes readable for the reader.
++  class writer_task : public dripcore::task
++  {
++  public:
++    writer_task(int fd, int peer_fd, std::atomic<bool>& done)
++        : fd_(fd), peer_fd_(peer_fd), done_(done) {}
++
++    dripcore::awaitable<> body() override
++    {
++      co_await writable(fd_);
++
++      ssize_t n = write(peer_fd_, "x", 1);
++      CHECK(n == 1);
++
++      done_ = true;
++      co_return;
++    }
++
++  private:
++    int fd_;
++    int peer_fd_;
++    std::atomic<bool>& done_;
++  };
++
++  // Spawn the reader first so its registration exists before the writer's.
++  scheduler.spawn<reader_task>(sv[0], reader_done);
++  scheduler.spawn<writer_task>(sv[0], sv[1], writer_done);
++
++  scheduler.run();
++
++  CHECK(reader_done == true);
++  CHECK(writer_done == true);
++
++  close(sv[0]);
++  close(sv[1]);
+ }
+\ No newline at end of file

@@ -5,12 +5,15 @@
 
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/socket.h>
 
 #include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <cstddef>
 #include <chrono>
+#include <exception>
+#include <stdexcept>
 
 TEST_CASE("scheduler: basic task execution")
 {
@@ -1140,4 +1143,170 @@ TEST_CASE("task_control: stop() on failing task propagates exception"
   scheduler.run();
 
   CHECK(stopper_resumed == true);
+}
+
+// ---------------------------------------------------------------------------
+// Regression test: two tasks suspended on the SAME fd with different event
+// masks (one readable, one writable). epoll keeps a single interest entry
+// per fd, so the epoll backend must fan events out to all waiters on the fd;
+// before that fix, the second registration clobbered the first (EEXIST ->
+// EPOLL_CTL_MOD) and the readable waiter could hang forever. kqueue handles
+// this natively because knotes are keyed by (fd, filter).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("scheduler: readable and writable waits on the same fd from two tasks"
+  * doctest::timeout(5))
+{
+  int sv[2];
+  REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+  fcntl(sv[0], F_SETFL, O_NONBLOCK);
+
+  dripcore::scheduler scheduler;
+  std::atomic<bool> reader_done{false};
+  std::atomic<bool> writer_done{false};
+
+  // Reader task - waits for the fd to become readable
+  class reader_task : public dripcore::task
+  {
+  public:
+    reader_task(int fd, std::atomic<bool>& done) : fd_(fd), done_(done) {}
+
+    dripcore::awaitable<> body() override
+    {
+      co_await readable(fd_);
+
+      char buf[16];
+      ssize_t n = read(fd_, buf, sizeof(buf));
+      CHECK(n > 0);
+
+      done_ = true;
+      co_return;
+    }
+
+  private:
+    int fd_;
+    std::atomic<bool>& done_;
+  };
+
+  // Writer task - waits for the SAME fd to become writable, then writes to
+  // the peer end so that sv[0] becomes readable for the reader.
+  class writer_task : public dripcore::task
+  {
+  public:
+    writer_task(int fd, int peer_fd, std::atomic<bool>& done)
+        : fd_(fd), peer_fd_(peer_fd), done_(done) {}
+
+    dripcore::awaitable<> body() override
+    {
+      co_await writable(fd_);
+
+      ssize_t n = write(peer_fd_, "x", 1);
+      CHECK(n == 1);
+
+      done_ = true;
+      co_return;
+    }
+
+  private:
+    int fd_;
+    int peer_fd_;
+    std::atomic<bool>& done_;
+  };
+
+  // Spawn the reader first so its registration exists before the writer's.
+  scheduler.spawn<reader_task>(sv[0], reader_done);
+  scheduler.spawn<writer_task>(sv[0], sv[1], writer_done);
+
+  scheduler.run();
+
+  CHECK(reader_done == true);
+  CHECK(writer_done == true);
+
+  close(sv[0]);
+  close(sv[1]);
+}
+
+// ---------------------------------------------------------------------------
+// event_loop allows at most one waiter per (fd, direction). A second task
+// awaiting the same direction is a programming error: it must fail with
+// std::logic_error rather than stay suspended forever, and it must not
+// disturb the task that legitimately owns the fd.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("scheduler: two readers on the same fd - second task fails, first completes"
+  * doctest::timeout(5))
+{
+  int sv[2];
+  REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+  fcntl(sv[0], F_SETFL, O_NONBLOCK);
+
+  dripcore::scheduler scheduler;
+  std::atomic<bool> first_done{false};
+
+  class owner_reader : public dripcore::task
+  {
+  public:
+    owner_reader(int fd, std::atomic<bool>& done) : fd_(fd), done_(done) {}
+
+    dripcore::awaitable<> body() override
+    {
+      co_await readable(fd_);
+
+      char buf[8];
+      CHECK(read(fd_, buf, sizeof(buf)) > 0);
+
+      done_ = true;
+      co_return;
+    }
+
+  private:
+    int fd_;
+    std::atomic<bool>& done_;
+  };
+
+  // Deliberately does not catch: the failure must reach the control block.
+  class duplicate_reader : public dripcore::task
+  {
+  public:
+    explicit duplicate_reader(int fd) : fd_(fd) {}
+
+    dripcore::awaitable<> body() override
+    {
+      co_await readable(fd_);   // must throw, not hang
+      co_return;
+    }
+
+  private:
+    int fd_;
+  };
+
+  scheduler.spawn<owner_reader>(sv[0], first_done);
+  auto duplicate = scheduler.spawn<duplicate_reader>(sv[0]);
+
+  // Make the fd readable so the owning reader can finish.
+  REQUIRE(write(sv[1], "x", 1) == 1);
+
+  scheduler.run();
+
+  CHECK(first_done == true);
+
+  CHECK(duplicate.done() == true);
+  REQUIRE(duplicate.exception() != nullptr);
+
+  bool caught_logic_error = false;
+  try
+  {
+    std::rethrow_exception(duplicate.exception());
+  }
+  catch (const std::logic_error&)
+  {
+    caught_logic_error = true;
+  }
+  catch (...)
+  {
+  }
+  CHECK(caught_logic_error == true);
+
+  close(sv[0]);
+  close(sv[1]);
 }

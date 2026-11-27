@@ -78,7 +78,7 @@ namespace dripcore
     // Called from ~io_awaiter. If still armed, remove the registration from the
     // event loop (kqueue EV_DELETE / epoll EPOLL_CTL_DEL).
     if (unlink_io(a)) {
-      event_loop_->deregister_event(a->fd_, a->events_);
+      event_loop_->deregister_event(a->fd_, a->events_, a);
     }
   }
 
@@ -184,11 +184,12 @@ namespace dripcore
 
   void executor::on_io_event(io_awaiter* a)
   {
-    // A readiness event was delivered. The backend disarmed this registration
-    // on delivery (kqueue EV_ONESHOT removes it; epoll EPOLLONESHOT disables
-    // it), so it will not fire again until re-armed. Once-only guard: only
-    // resume if still linked, so a concurrent cancel in the same poll batch
-    // cannot cause a double resume.
+    // A readiness event was delivered for this waiter. The backend removed
+    // the waiter from its registration on delivery (kqueue EV_ONESHOT removes
+    // the knote; the epoll backend removes the waiter from the fd's fan-out
+    // list and re-arms the remaining waiters), so it will not fire again
+    // until re-armed. Once-only guard: only resume if still linked, so a
+    // concurrent cancel in the same poll batch cannot cause a double resume.
     if (unlink_io(a)) {
       if (a->control_block_) {
         resume(a->control_block_->handle_);
@@ -207,7 +208,7 @@ namespace dripcore
       io_awaiter* a = io_head_;
       a->cancel();
       unlink_io(a);                                     // advances io_head_
-      event_loop_->deregister_event(a->fd_, a->events_);
+      event_loop_->deregister_event(a->fd_, a->events_, a);
       if (a->control_block_) {
         ready_task(a->control_block_);
       }
