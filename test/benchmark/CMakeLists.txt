@@ -1,4 +1,7 @@
-file(GLOB BENCHMARK_SOURCES
+# CONFIGURE_DEPENDS makes the build re-run the glob, so a newly added benchmark
+# file is compiled without a manual reconfigure. Without it a stale build
+# directory silently keeps running the old set of benchmarks.
+file(GLOB BENCHMARK_SOURCES CONFIGURE_DEPENDS
     "*.cpp"
 )
 
